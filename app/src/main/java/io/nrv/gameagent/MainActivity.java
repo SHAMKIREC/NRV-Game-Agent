@@ -10,6 +10,7 @@ import android.graphics.Typeface;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -25,11 +26,14 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import io.nrv.gameagent.capture.CaptureService;
+import io.nrv.gameagent.input.AutomationSettings;
+import io.nrv.gameagent.input.GameAccessibilityService;
 
 public class MainActivity extends AppCompatActivity {
 
     private MediaProjectionManager projectionManager;
     private TextView statusView;
+    private Button automationButton;
 
     private final ActivityResultLauncher<Intent> captureLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -59,6 +63,12 @@ public class MainActivity extends AppCompatActivity {
         setContentView(buildContent());
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refreshAutomationButton();
+    }
+
     private LinearLayout buildContent() {
         int padding = dp(24);
 
@@ -78,9 +88,9 @@ public class MainActivity extends AppCompatActivity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Этап 1 · зрение и телеметрия");
+        subtitle.setText("Зрение → решение → управление");
         subtitle.setTextSize(16);
-        subtitle.setPadding(0, dp(8), 0, dp(32));
+        subtitle.setPadding(0, dp(8), 0, dp(24));
         root.addView(subtitle);
 
         statusView = new TextView(this);
@@ -89,28 +99,74 @@ public class MainActivity extends AppCompatActivity {
         statusView.setPadding(0, 0, 0, dp(24));
         root.addView(statusView);
 
+        Button accessibility = new Button(this);
+        accessibility.setText("1. ОТКРЫТЬ ДОСТУП К УПРАВЛЕНИЮ");
+        accessibility.setOnClickListener(v -> {
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            setStatus("Включи NRV Game Agent в специальных возможностях Android");
+        });
+        root.addView(accessibility, fullWidthParams(0));
+
+        automationButton = new Button(this);
+        automationButton.setOnClickListener(v -> toggleAutomation());
+        root.addView(automationButton, fullWidthParams(12));
+        refreshAutomationButton();
+
         Button start = new Button(this);
-        start.setText("НАЧАТЬ ЗАХВАТ ЭКРАНА");
+        start.setText("3. НАЧАТЬ ЗАХВАТ ЭКРАНА");
         start.setOnClickListener(v -> startCapture());
-        root.addView(start, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
+        root.addView(start, fullWidthParams(12));
 
         Button stop = new Button(this);
         stop.setText("ОСТАНОВИТЬ");
         stop.setOnClickListener(v -> {
+            AutomationSettings.setEnabled(this, false);
             stopService(new Intent(this, CaptureService.class));
-            setStatus("Захват остановлен");
+            refreshAutomationButton();
+            setStatus("Захват и управление остановлены");
         });
-        LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(
+        root.addView(stop, fullWidthParams(12));
+
+        return root;
+    }
+
+    private LinearLayout.LayoutParams fullWidthParams(int topMarginDp) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         );
-        stopParams.topMargin = dp(12);
-        root.addView(stop, stopParams);
+        params.topMargin = dp(topMarginDp);
+        return params;
+    }
 
-        return root;
+    private void toggleAutomation() {
+        boolean enabled = AutomationSettings.isEnabled(this);
+        if (!enabled && !GameAccessibilityService.isConnected()) {
+            Toast.makeText(
+                    this,
+                    "Сначала включи NRV Game Agent в специальных возможностях",
+                    Toast.LENGTH_LONG
+            ).show();
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            return;
+        }
+
+        AutomationSettings.setEnabled(this, !enabled);
+        refreshAutomationButton();
+        setStatus(!enabled ? "Управление включено" : "Управление выключено");
+    }
+
+    private void refreshAutomationButton() {
+        if (automationButton == null) return;
+        boolean enabled = AutomationSettings.isEnabled(this);
+        boolean connected = GameAccessibilityService.isConnected();
+        automationButton.setText(
+                enabled
+                        ? "2. УПРАВЛЕНИЕ: ВКЛЮЧЕНО"
+                        : connected
+                            ? "2. ВКЛЮЧИТЬ УПРАВЛЕНИЕ"
+                            : "2. УПРАВЛЕНИЕ: НУЖЕН ДОСТУП"
+        );
     }
 
     private int[] getScreenSize() {
