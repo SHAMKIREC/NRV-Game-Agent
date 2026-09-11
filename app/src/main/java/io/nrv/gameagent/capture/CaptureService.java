@@ -29,6 +29,7 @@ import io.nrv.gameagent.agent.GameState;
 import io.nrv.gameagent.agent.RuleAgent;
 import io.nrv.gameagent.agent.TacticalIntent;
 import io.nrv.gameagent.agent.TacticalPlanner;
+import io.nrv.gameagent.input.GameAccessibilityService;
 import io.nrv.gameagent.vision.EnemyObservation;
 import io.nrv.gameagent.vision.EnemyTracker;
 import io.nrv.gameagent.vision.HudObservation;
@@ -50,6 +51,8 @@ public class CaptureService extends Service {
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader imageReader;
+    private int captureWidth = 0;
+    private int captureHeight = 0;
     private final AtomicLong frameCount = new AtomicLong(0);
     private final MlbbHudAnalyzer hudAnalyzer = new MlbbHudAnalyzer();
     private final EnemyTracker enemyTracker = new EnemyTracker();
@@ -101,6 +104,8 @@ public class CaptureService extends Service {
 
         cleanupProjection(false);
         enemyTracker.reset();
+        captureWidth = width;
+        captureHeight = height;
 
         MediaProjectionManager manager =
                 (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
@@ -139,6 +144,11 @@ public class CaptureService extends Service {
                     GameState gameState = observation.toGameState();
                     Decision decision = ruleAgent.decide(gameState);
                     TacticalIntent intentPlan = tacticalPlanner.plan(decision, gameState, trackedEnemy);
+                    boolean gestureSent = GameAccessibilityService.executeIfEnabled(
+                            intentPlan,
+                            captureWidth,
+                            captureHeight
+                    );
 
                     String enemyStatus = trackedEnemy.detected()
                             ? trackedEnemy.direction().name() + " " + String.format(Locale.US, "%.2f", trackedEnemy.distance())
@@ -146,10 +156,11 @@ public class CaptureService extends Service {
 
                     String status = String.format(
                             Locale.US,
-                            "HP %.0f%% · E:%s · %s",
+                            "HP %.0f%% · E:%s · %s%s",
                             observation.hpRatio() * 100.0,
                             enemyStatus,
-                            decision.name()
+                            decision.name(),
+                            gestureSent ? " · INPUT" : ""
                     );
 
                     Log.d(
@@ -164,7 +175,8 @@ public class CaptureService extends Service {
                                     " moveX=" + intentPlan.moveX() +
                                     " moveY=" + intentPlan.moveY() +
                                     " attack=" + intentPlan.wantsBasicAttack() +
-                                    " skill=" + intentPlan.wantsSkill()
+                                    " skill=" + intentPlan.wantsSkill() +
+                                    " gestureSent=" + gestureSent
                     );
                     updateNotification(status);
                 }
