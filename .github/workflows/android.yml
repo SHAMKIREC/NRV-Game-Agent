@@ -27,6 +27,12 @@ jobs:
       - name: Install Android SDK 36
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
+      - name: Restore persistent debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: nrv-game-agent-debug-keystore-v1
+
       - name: Set up Gradle 9.6
         uses: gradle/actions/setup-gradle@v4
         with:
