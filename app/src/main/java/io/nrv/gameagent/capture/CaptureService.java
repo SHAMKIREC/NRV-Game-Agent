@@ -25,7 +25,11 @@ import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.nrv.gameagent.agent.Decision;
+import io.nrv.gameagent.agent.GameState;
 import io.nrv.gameagent.agent.RuleAgent;
+import io.nrv.gameagent.agent.TacticalIntent;
+import io.nrv.gameagent.agent.TacticalPlanner;
+import io.nrv.gameagent.vision.EnemyObservation;
 import io.nrv.gameagent.vision.HudObservation;
 import io.nrv.gameagent.vision.MlbbHudAnalyzer;
 
@@ -48,6 +52,7 @@ public class CaptureService extends Service {
     private final AtomicLong frameCount = new AtomicLong(0);
     private final MlbbHudAnalyzer hudAnalyzer = new MlbbHudAnalyzer();
     private final RuleAgent ruleAgent = new RuleAgent();
+    private final TacticalPlanner tacticalPlanner = new TacticalPlanner();
 
     @Override
     public void onCreate() {
@@ -117,13 +122,20 @@ public class CaptureService extends Service {
                 long count = frameCount.incrementAndGet();
                 if (count % ANALYZE_EVERY_N_FRAMES == 0) {
                     HudObservation observation = hudAnalyzer.analyze(image);
-                    Decision decision = ruleAgent.decide(observation.toGameState());
+                    GameState gameState = observation.toGameState();
+                    Decision decision = ruleAgent.decide(gameState);
+                    EnemyObservation enemy = observation.enemies();
+                    TacticalIntent intentPlan = tacticalPlanner.plan(decision, gameState, enemy);
+
+                    String enemyStatus = enemy.detected()
+                            ? enemy.direction().name() + " " + String.format(Locale.US, "%.2f", enemy.distance())
+                            : "NONE";
 
                     String status = String.format(
                             Locale.US,
-                            "HP %.0f%% · Mana %.0f%% · %s",
+                            "HP %.0f%% · E:%s · %s",
                             observation.hpRatio() * 100.0,
-                            observation.manaRatio() * 100.0,
+                            enemyStatus,
                             decision.name()
                     );
 
@@ -132,9 +144,14 @@ public class CaptureService extends Service {
                             "frames=" + count +
                                     " hp=" + observation.hpRatio() +
                                     " mana=" + observation.manaRatio() +
-                                    " hpConf=" + observation.hpConfidence() +
-                                    " manaConf=" + observation.manaConfidence() +
-                                    " decision=" + decision
+                                    " enemies=" + enemy.count() +
+                                    " enemyDir=" + enemy.direction() +
+                                    " enemyDist=" + enemy.distance() +
+                                    " decision=" + decision +
+                                    " moveX=" + intentPlan.moveX() +
+                                    " moveY=" + intentPlan.moveY() +
+                                    " attack=" + intentPlan.wantsBasicAttack() +
+                                    " skill=" + intentPlan.wantsSkill()
                     );
                     updateNotification(status);
                 }
