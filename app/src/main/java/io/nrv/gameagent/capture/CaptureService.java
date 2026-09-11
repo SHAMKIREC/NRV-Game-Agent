@@ -1,5 +1,6 @@
 package io.nrv.gameagent.capture;
 
+import android.app.Activity;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
@@ -75,19 +76,19 @@ public class CaptureService extends Service {
 
     @SuppressWarnings("deprecation")
     private void startProjection(Intent intent) {
-        int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1);
+        int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED);
         Intent resultData = intent.getParcelableExtra(EXTRA_RESULT_DATA);
         int width = intent.getIntExtra(EXTRA_WIDTH, 1280);
         int height = intent.getIntExtra(EXTRA_HEIGHT, 720);
         int density = intent.getIntExtra(EXTRA_DENSITY, getResources().getDisplayMetrics().densityDpi);
 
-        if (resultData == null || resultCode == -1) {
+        if (resultData == null || resultCode != Activity.RESULT_OK) {
             Log.e(TAG, "Missing MediaProjection permission data");
             stopSelf();
             return;
         }
 
-        cleanupProjection();
+        cleanupProjection(false);
 
         MediaProjectionManager manager =
                 (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
@@ -96,7 +97,8 @@ public class CaptureService extends Service {
             @Override
             public void onStop() {
                 Log.i(TAG, "MediaProjection stopped by system/user");
-                cleanupProjection();
+                projection = null;
+                cleanupProjection(false);
                 stopSelf();
             }
         }, null);
@@ -113,8 +115,7 @@ public class CaptureService extends Service {
                     Log.d(TAG, "frames=" + count + " size=" + image.getWidth() + "x" + image.getHeight());
                 }
 
-                // Следующий этап: передать плоскость RGBA в VisionPipeline.
-                // Сейчас MVP только подтверждает стабильное получение кадров.
+                // Следующий этап: передать RGBA-кадр в VisionPipeline.
             } catch (Exception error) {
                 Log.e(TAG, "Frame processing failed", error);
             } finally {
@@ -148,7 +149,7 @@ public class CaptureService extends Service {
         }
     }
 
-    private void cleanupProjection() {
+    private void cleanupProjection(boolean stopProjection) {
         if (virtualDisplay != null) {
             virtualDisplay.release();
             virtualDisplay = null;
@@ -157,15 +158,16 @@ public class CaptureService extends Service {
             imageReader.close();
             imageReader = null;
         }
-        if (projection != null) {
-            projection.stop();
+        if (stopProjection && projection != null) {
+            MediaProjection current = projection;
             projection = null;
+            current.stop();
         }
     }
 
     @Override
     public void onDestroy() {
-        cleanupProjection();
+        cleanupProjection(true);
         super.onDestroy();
     }
 
