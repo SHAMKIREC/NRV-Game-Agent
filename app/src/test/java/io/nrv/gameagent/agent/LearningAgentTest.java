@@ -32,4 +32,22 @@ public class LearningAgentTest {
 
         assertEquals(Decision.FARM, agent.decide(state));
     }
+
+    @Test
+    public void snapshotRestoresLearnedPolicy() {
+        LearningAgent original = new LearningAgent(0.30, 0.90, 0.0, 1L);
+        GameState state = new GameState(0.45, 0.60, 1, 1, false, false, false, false, 4, 1400);
+
+        for (int i = 0; i < 50; i++) {
+            original.learn(state, Decision.FARM, 4.0, state, true);
+        }
+
+        String snapshot = original.snapshot();
+
+        LearningAgent restored = new LearningAgent(0.30, 0.90, 0.0, 2L);
+        restored.restore(snapshot);
+
+        assertEquals(Decision.FARM, restored.decide(state));
+        assertTrue(restored.qValue(state, Decision.FARM) > 0.0);
+    }
 }
