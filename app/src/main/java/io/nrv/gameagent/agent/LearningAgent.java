@@ -61,6 +61,42 @@ public final class LearningAgent {
         return qTable.size();
     }
 
+    public String snapshot() {
+        StringBuilder out = new StringBuilder();
+        for (Map.Entry<String, double[]> entry : qTable.entrySet()) {
+            out.append(entry.getKey());
+            for (double value : entry.getValue()) {
+                out.append('\t').append(value);
+            }
+            out.append('\n');
+        }
+        return out.toString();
+    }
+
+    public void restore(String snapshot) {
+        qTable.clear();
+        if (snapshot == null || snapshot.isBlank()) return;
+
+        String[] lines = snapshot.split("\\R");
+        for (String line : lines) {
+            if (line.isBlank()) continue;
+            String[] parts = line.split("\\t");
+            if (parts.length != Decision.values().length + 1) continue;
+
+            double[] values = new double[Decision.values().length];
+            boolean valid = true;
+            for (int i = 0; i < values.length; i++) {
+                try {
+                    values[i] = Double.parseDouble(parts[i + 1]);
+                } catch (NumberFormatException error) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) qTable.put(parts[0], values);
+        }
+    }
+
     private double[] valuesFor(GameState state) {
         return qTable.computeIfAbsent(key(state), ignored -> new double[Decision.values().length]);
     }
