@@ -8,6 +8,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.media.projection.MediaProjectionManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -26,6 +27,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import io.nrv.gameagent.capture.CaptureService;
+import io.nrv.gameagent.input.AccessibilityDiagnostics;
 import io.nrv.gameagent.input.AutomationSettings;
 import io.nrv.gameagent.input.GameAccessibilityService;
 
@@ -33,6 +35,7 @@ public class MainActivity extends AppCompatActivity {
 
     private MediaProjectionManager projectionManager;
     private TextView statusView;
+    private TextView diagnosticsView;
     private Button automationButton;
 
     private final ActivityResultLauncher<Intent> captureLauncher =
@@ -66,11 +69,11 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        refreshAutomationButton();
+        refreshDiagnostics();
     }
 
     private LinearLayout buildContent() {
-        int padding = dp(24);
+        int padding = dp(20);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -90,27 +93,38 @@ public class MainActivity extends AppCompatActivity {
         TextView subtitle = new TextView(this);
         subtitle.setText("Зрение → решение → управление");
         subtitle.setTextSize(16);
-        subtitle.setPadding(0, dp(8), 0, dp(24));
+        subtitle.setPadding(0, dp(6), 0, dp(16));
         root.addView(subtitle);
 
         statusView = new TextView(this);
-        statusView.setText("Готов к запуску");
-        statusView.setTextSize(18);
-        statusView.setPadding(0, 0, 0, dp(24));
+        statusView.setText("Проверяю доступ к управлению…");
+        statusView.setTextSize(17);
+        statusView.setPadding(0, 0, 0, dp(12));
         root.addView(statusView);
 
+        diagnosticsView = new TextView(this);
+        diagnosticsView.setTextSize(14);
+        diagnosticsView.setPadding(dp(12), dp(10), dp(12), dp(10));
+        root.addView(diagnosticsView, fullWidthParams(0));
+
         Button accessibility = new Button(this);
-        accessibility.setText("1. ОТКРЫТЬ ДОСТУП К УПРАВЛЕНИЮ");
-        accessibility.setOnClickListener(v -> {
-            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-            setStatus("Включи NRV Game Agent в специальных возможностях Android");
-        });
-        root.addView(accessibility, fullWidthParams(0));
+        accessibility.setText("1. ОТКРЫТЬ СПЕЦИАЛЬНЫЕ ВОЗМОЖНОСТИ");
+        accessibility.setOnClickListener(v -> openAccessibilitySettings());
+        root.addView(accessibility, fullWidthParams(10));
+
+        Button appInfo = new Button(this);
+        appInfo.setText("ЕСЛИ СЕРОЕ — ОТКРЫТЬ НАСТРОЙКИ ПРИЛОЖЕНИЯ");
+        appInfo.setOnClickListener(v -> openAppDetails());
+        root.addView(appInfo, fullWidthParams(8));
+
+        Button recheck = new Button(this);
+        recheck.setText("ПЕРЕПРОВЕРИТЬ ДОСТУП");
+        recheck.setOnClickListener(v -> refreshDiagnostics());
+        root.addView(recheck, fullWidthParams(8));
 
         automationButton = new Button(this);
         automationButton.setOnClickListener(v -> toggleAutomation());
         root.addView(automationButton, fullWidthParams(12));
-        refreshAutomationButton();
 
         Button start = new Button(this);
         start.setText("3. НАЧАТЬ ЗАХВАТ ЭКРАНА");
@@ -122,12 +136,33 @@ public class MainActivity extends AppCompatActivity {
         stop.setOnClickListener(v -> {
             AutomationSettings.setEnabled(this, false);
             stopService(new Intent(this, CaptureService.class));
-            refreshAutomationButton();
+            refreshDiagnostics();
             setStatus("Захват и управление остановлены");
         });
         root.addView(stop, fullWidthParams(12));
 
+        refreshDiagnostics();
         return root;
+    }
+
+    private void openAccessibilitySettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            setStatus("Найди «NRV Game Agent — управление» и включи службу");
+        } catch (Exception error) {
+            Toast.makeText(this, "Не удалось открыть специальные возможности", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void openAppDetails() {
+        try {
+            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+            setStatus("На Xiaomi проверь «Разрешить запрещённые/ограниченные настройки», затем вернись сюда");
+        } catch (Exception error) {
+            Toast.makeText(this, "Не удалось открыть настройки приложения", Toast.LENGTH_LONG).show();
+        }
     }
 
     private LinearLayout.LayoutParams fullWidthParams(int topMarginDp) {
@@ -140,33 +175,46 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void toggleAutomation() {
+        AccessibilityDiagnostics.Snapshot snapshot = AccessibilityDiagnostics.read(this);
         boolean enabled = AutomationSettings.isEnabled(this);
-        if (!enabled && !GameAccessibilityService.isConnected()) {
-            Toast.makeText(
-                    this,
-                    "Сначала включи NRV Game Agent в специальных возможностях",
-                    Toast.LENGTH_LONG
-            ).show();
-            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+
+        if (!enabled && !snapshot.serviceConnected()) {
+            setStatus(snapshot.nextStep());
+            Toast.makeText(this, snapshot.nextStep(), Toast.LENGTH_LONG).show();
+            if (!snapshot.serviceEnabled()) {
+                openAccessibilitySettings();
+            }
             return;
         }
 
         AutomationSettings.setEnabled(this, !enabled);
-        refreshAutomationButton();
+        refreshDiagnostics();
         setStatus(!enabled ? "Управление включено" : "Управление выключено");
     }
 
-    private void refreshAutomationButton() {
-        if (automationButton == null) return;
-        boolean enabled = AutomationSettings.isEnabled(this);
-        boolean connected = GameAccessibilityService.isConnected();
-        automationButton.setText(
-                enabled
-                        ? "2. УПРАВЛЕНИЕ: ВКЛЮЧЕНО"
-                        : connected
-                            ? "2. ВКЛЮЧИТЬ УПРАВЛЕНИЕ"
-                            : "2. УПРАВЛЕНИЕ: НУЖЕН ДОСТУП"
-        );
+    private void refreshDiagnostics() {
+        AccessibilityDiagnostics.Snapshot snapshot = AccessibilityDiagnostics.read(this);
+
+        if (diagnosticsView != null) {
+            diagnosticsView.setText(snapshot.summary() + "\n\n" + snapshot.nextStep());
+        }
+
+        if (automationButton != null) {
+            boolean enabled = AutomationSettings.isEnabled(this);
+            automationButton.setText(
+                    enabled
+                            ? "2. УПРАВЛЕНИЕ: ВКЛЮЧЕНО"
+                            : snapshot.serviceConnected()
+                                ? "2. ВКЛЮЧИТЬ УПРАВЛЕНИЕ"
+                                : "2. УПРАВЛЕНИЕ: НУЖЕН ДОСТУП"
+            );
+        }
+
+        if (snapshot.serviceConnected()) {
+            setStatus("Доступ к управлению работает");
+        } else {
+            setStatus(snapshot.nextStep());
+        }
     }
 
     private int[] getScreenSize() {
