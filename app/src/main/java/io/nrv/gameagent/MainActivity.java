@@ -5,10 +5,12 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -40,9 +42,9 @@ public class MainActivity extends AppCompatActivity {
                 serviceIntent.putExtra(CaptureService.EXTRA_RESULT_CODE, result.getResultCode());
                 serviceIntent.putExtra(CaptureService.EXTRA_RESULT_DATA, result.getData());
 
-                var metrics = getWindowManager().getCurrentWindowMetrics().getBounds();
-                serviceIntent.putExtra(CaptureService.EXTRA_WIDTH, metrics.width());
-                serviceIntent.putExtra(CaptureService.EXTRA_HEIGHT, metrics.height());
+                int[] size = getScreenSize();
+                serviceIntent.putExtra(CaptureService.EXTRA_WIDTH, size[0]);
+                serviceIntent.putExtra(CaptureService.EXTRA_HEIGHT, size[1]);
                 serviceIntent.putExtra(CaptureService.EXTRA_DENSITY, getResources().getDisplayMetrics().densityDpi);
 
                 ContextCompat.startForegroundService(this, serviceIntent);
@@ -109,6 +111,17 @@ public class MainActivity extends AppCompatActivity {
         root.addView(stop, stopParams);
 
         return root;
+    }
+
+    private int[] getScreenSize() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            Rect bounds = getWindowManager().getCurrentWindowMetrics().getBounds();
+            return new int[]{bounds.width(), bounds.height()};
+        }
+
+        DisplayMetrics metrics = new DisplayMetrics();
+        getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
+        return new int[]{metrics.widthPixels, metrics.heightPixels};
     }
 
     private void startCapture() {
