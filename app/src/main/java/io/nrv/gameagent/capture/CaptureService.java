@@ -21,7 +21,13 @@ import android.util.Log;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
+
+import io.nrv.gameagent.agent.Decision;
+import io.nrv.gameagent.agent.RuleAgent;
+import io.nrv.gameagent.vision.HudObservation;
+import io.nrv.gameagent.vision.MlbbHudAnalyzer;
 
 public class CaptureService extends Service {
 
@@ -34,11 +40,14 @@ public class CaptureService extends Service {
     private static final String TAG = "NRVCapture";
     private static final String CHANNEL_ID = "nrv_capture";
     private static final int NOTIFICATION_ID = 101;
+    private static final int ANALYZE_EVERY_N_FRAMES = 8;
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader imageReader;
     private final AtomicLong frameCount = new AtomicLong(0);
+    private final MlbbHudAnalyzer hudAnalyzer = new MlbbHudAnalyzer();
+    private final RuleAgent ruleAgent = new RuleAgent();
 
     @Override
     public void onCreate() {
@@ -53,12 +62,7 @@ public class CaptureService extends Service {
             return START_NOT_STICKY;
         }
 
-        var notification = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("NRV Game Agent")
-                .setContentText("Получаю кадры экрана для анализа")
-                .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setOngoing(true)
-                .build();
+        var notification = buildNotification("Получаю кадры экрана для анализа");
 
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(
@@ -111,11 +115,29 @@ public class CaptureService extends Service {
                 if (image == null) return;
 
                 long count = frameCount.incrementAndGet();
-                if (count % 30 == 0) {
-                    Log.d(TAG, "frames=" + count + " size=" + image.getWidth() + "x" + image.getHeight());
-                }
+                if (count % ANALYZE_EVERY_N_FRAMES == 0) {
+                    HudObservation observation = hudAnalyzer.analyze(image);
+                    Decision decision = ruleAgent.decide(observation.toGameState());
 
-                // Следующий этап: передать RGBA-кадр в VisionPipeline.
+                    String status = String.format(
+                            Locale.US,
+                            "HP %.0f%% · Mana %.0f%% · %s",
+                            observation.hpRatio() * 100.0,
+                            observation.manaRatio() * 100.0,
+                            decision.name()
+                    );
+
+                    Log.d(
+                            TAG,
+                            "frames=" + count +
+                                    " hp=" + observation.hpRatio() +
+                                    " mana=" + observation.manaRatio() +
+                                    " hpConf=" + observation.hpConfidence() +
+                                    " manaConf=" + observation.manaConfidence() +
+                                    " decision=" + decision
+                    );
+                    updateNotification(status);
+                }
             } catch (Exception error) {
                 Log.e(TAG, "Frame processing failed", error);
             } finally {
@@ -135,6 +157,23 @@ public class CaptureService extends Service {
         );
 
         Log.i(TAG, "Capture started: " + width + "x" + height + " @" + density);
+    }
+
+    private android.app.Notification buildNotification(String text) {
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("NRV Game Agent")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setOnlyAlertOnce(true)
+                .setOngoing(true)
+                .build();
+    }
+
+    private void updateNotification(String text) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.notify(NOTIFICATION_ID, buildNotification(text));
+        }
     }
 
     private void createChannel() {
