@@ -30,6 +30,7 @@ import io.nrv.gameagent.agent.RuleAgent;
 import io.nrv.gameagent.agent.TacticalIntent;
 import io.nrv.gameagent.agent.TacticalPlanner;
 import io.nrv.gameagent.vision.EnemyObservation;
+import io.nrv.gameagent.vision.EnemyTracker;
 import io.nrv.gameagent.vision.HudObservation;
 import io.nrv.gameagent.vision.MlbbHudAnalyzer;
 
@@ -51,6 +52,7 @@ public class CaptureService extends Service {
     private ImageReader imageReader;
     private final AtomicLong frameCount = new AtomicLong(0);
     private final MlbbHudAnalyzer hudAnalyzer = new MlbbHudAnalyzer();
+    private final EnemyTracker enemyTracker = new EnemyTracker();
     private final RuleAgent ruleAgent = new RuleAgent();
     private final TacticalPlanner tacticalPlanner = new TacticalPlanner();
 
@@ -98,6 +100,7 @@ public class CaptureService extends Service {
         }
 
         cleanupProjection(false);
+        enemyTracker.reset();
 
         MediaProjectionManager manager =
                 (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
@@ -121,14 +124,24 @@ public class CaptureService extends Service {
 
                 long count = frameCount.incrementAndGet();
                 if (count % ANALYZE_EVERY_N_FRAMES == 0) {
-                    HudObservation observation = hudAnalyzer.analyze(image);
+                    HudObservation rawObservation = hudAnalyzer.analyze(image);
+                    EnemyObservation trackedEnemy = enemyTracker.update(rawObservation.enemies());
+                    HudObservation observation = new HudObservation(
+                            rawObservation.hpRatio(),
+                            rawObservation.manaRatio(),
+                            rawObservation.hpConfidence(),
+                            rawObservation.manaConfidence(),
+                            rawObservation.landscape(),
+                            rawObservation.dead(),
+                            trackedEnemy
+                    );
+
                     GameState gameState = observation.toGameState();
                     Decision decision = ruleAgent.decide(gameState);
-                    EnemyObservation enemy = observation.enemies();
-                    TacticalIntent intentPlan = tacticalPlanner.plan(decision, gameState, enemy);
+                    TacticalIntent intentPlan = tacticalPlanner.plan(decision, gameState, trackedEnemy);
 
-                    String enemyStatus = enemy.detected()
-                            ? enemy.direction().name() + " " + String.format(Locale.US, "%.2f", enemy.distance())
+                    String enemyStatus = trackedEnemy.detected()
+                            ? trackedEnemy.direction().name() + " " + String.format(Locale.US, "%.2f", trackedEnemy.distance())
                             : "NONE";
 
                     String status = String.format(
@@ -144,9 +157,9 @@ public class CaptureService extends Service {
                             "frames=" + count +
                                     " hp=" + observation.hpRatio() +
                                     " mana=" + observation.manaRatio() +
-                                    " enemies=" + enemy.count() +
-                                    " enemyDir=" + enemy.direction() +
-                                    " enemyDist=" + enemy.distance() +
+                                    " enemies=" + trackedEnemy.count() +
+                                    " enemyDir=" + trackedEnemy.direction() +
+                                    " enemyDist=" + trackedEnemy.distance() +
                                     " decision=" + decision +
                                     " moveX=" + intentPlan.moveX() +
                                     " moveY=" + intentPlan.moveY() +
@@ -223,6 +236,7 @@ public class CaptureService extends Service {
 
     @Override
     public void onDestroy() {
+        enemyTracker.reset();
         cleanupProjection(true);
         super.onDestroy();
     }
