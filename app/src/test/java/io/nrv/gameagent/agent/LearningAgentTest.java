@@ -19,7 +19,20 @@ public class LearningAgentTest {
 
         assertEquals(Decision.RETREAT, agent.decide(lowHp));
         assertTrue(agent.qValue(lowHp, Decision.RETREAT) > 0.0);
-        assertTrue(agent.knownStates() >= 2);
+        // A terminal transition deliberately does not bootstrap from nextState,
+        // therefore only the current state is inserted into the Q-table.
+        assertEquals(1, agent.knownStates());
+    }
+
+    @Test
+    public void learnsNextStateForNonTerminalTransition() {
+        LearningAgent agent = new LearningAgent(0.25, 0.90, 0.0, 42L);
+        GameState current = new GameState(0.45, 0.50, 1, 1, true, false, false, false, 3, 900);
+        GameState next = new GameState(0.70, 0.55, 0, 1, false, false, false, false, 3, 980);
+
+        agent.learn(current, Decision.RETREAT, 2.0, next, false);
+
+        assertEquals(2, agent.knownStates());
     }
 
     @Test
