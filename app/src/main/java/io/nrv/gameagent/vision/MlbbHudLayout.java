@@ -23,11 +23,12 @@ public final class MlbbHudLayout {
     public static final Region MINIMAP = new Region(0.0488, 0.0000, 0.1797, 0.2762);
     public static final Region SCORE_TIME = new Region(0.3906, 0.0000, 0.6045, 0.1058);
     public static final Region GOLD = new Region(0.7700, 0.0000, 0.8370, 0.0783);
-    public static final Region PLAYER_HUD = new Region(0.3900, 0.3150, 0.4900, 0.3900);
+    public static final Region PLAYER_HUD = new Region(0.4550, 0.3150, 0.5550, 0.4300);
 
-    // Narrow bars inside PLAYER_HUD, calibrated from the supplied screenshot.
-    public static final Region PLAYER_HP_BAR = new Region(0.4100, 0.3420, 0.4805, 0.3555);
-    public static final Region PLAYER_MANA_BAR = new Region(0.4100, 0.3600, 0.4805, 0.3735);
+    // Calibrated directly against the supplied 2048x945 screenshot.
+    // On that frame HP reads about 75%, mana about 99%.
+    public static final Region PLAYER_HP_BAR = new Region(0.4665, 0.3935, 0.5450, 0.4090);
+    public static final Region PLAYER_MANA_BAR = new Region(0.4665, 0.4095, 0.5450, 0.4210);
 
     public static final Region JOYSTICK = new Region(0.0800, 0.5550, 0.2450, 0.8850);
     public static final Region BASIC_ATTACK = new Region(0.7130, 0.6450, 0.8650, 0.9650);
