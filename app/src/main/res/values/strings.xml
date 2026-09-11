@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NRV Game Agent</string>
+    <string name="accessibility_service_description">Позволяет NRV Game Agent выполнять жесты джойстика и нажатия только когда управление явно включено в приложении.</string>
+</resources>
