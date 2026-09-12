@@ -11,39 +11,50 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import io.nrv.gameagent.MainActivity;
 import io.nrv.gameagent.poker.PokerLabActivity;
 
 /**
- * Minimal on-device AI companion keyboard.
- * It never captures the screen by itself: screen data only comes from the
- * separately approved MediaProjection flow in the companion app.
+ * NRV AI Keyboard is the primary on-screen companion UI.
+ * Screen capture is always requested through Android's MediaProjection consent.
  */
 public final class AiKeyboardService extends InputMethodService {
     private TextView insightView;
+    private TextView modeView;
 
     @Override
     public View onCreateInputView() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(8), dp(6), dp(8), dp(6));
+        root.setPadding(dp(6), dp(5), dp(6), dp(5));
 
-        LinearLayout tools = row();
-        tools.addView(tool("AI", v -> refreshInsight()));
-        tools.addView(tool("АНАЛИЗ ЭКРАНА", v -> openCompanion()));
-        tools.addView(tool("POKER LAB", v -> openPokerLab()));
-        root.addView(tools);
+        LinearLayout modeRow = row();
+        modeRow.addView(tool("AI", v -> setMode(CompanionModeStore.Mode.GENERAL)));
+        modeRow.addView(tool("POKER", v -> setMode(CompanionModeStore.Mode.POKER)));
+        modeRow.addView(tool("MOBA", v -> setMode(CompanionModeStore.Mode.MOBA)));
+        modeRow.addView(tool("ЭКРАН", v -> requestScreenCapture()));
+        root.addView(modeRow);
+
+        modeView = new TextView(this);
+        modeView.setTextSize(12);
+        modeView.setTypeface(Typeface.DEFAULT_BOLD);
+        modeView.setPadding(dp(6), dp(4), dp(6), 0);
+        root.addView(modeView);
 
         insightView = new TextView(this);
         insightView.setTextSize(13);
         insightView.setTypeface(Typeface.DEFAULT_BOLD);
-        insightView.setPadding(dp(6), dp(6), dp(6), dp(6));
-        insightView.setMaxLines(3);
+        insightView.setPadding(dp(6), dp(4), dp(6), dp(6));
+        insightView.setMaxLines(4);
         root.addView(insightView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         ));
-        refreshInsight();
+
+        LinearLayout tools = row();
+        tools.addView(tool("ОБНОВИТЬ", v -> refreshInsight()));
+        tools.addView(tool("POKER LAB", v -> openPokerLab()));
+        tools.addView(tool("⌨", v -> showInputMethodPicker()));
+        root.addView(tools);
 
         root.addView(letterRow("QWERTYUIOP"));
         root.addView(letterRow("ASDFGHJKL"));
@@ -55,15 +66,32 @@ public final class AiKeyboardService extends InputMethodService {
         bottom.addView(tool("↵", v -> sendEnter()));
         root.addView(bottom);
 
+        refreshInsight();
         return root;
+    }
+
+    @Override
+    public void onStartInputView(android.view.inputmethod.EditorInfo info, boolean restarting) {
+        super.onStartInputView(info, restarting);
+        refreshInsight();
+    }
+
+    private void setMode(CompanionModeStore.Mode mode) {
+        CompanionModeStore.set(this, mode);
+        refreshInsight();
+    }
+
+    private void requestScreenCapture() {
+        Intent intent = new Intent(this, KeyboardCaptureActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+        startActivity(intent);
     }
 
     private LinearLayout letterRow(String letters) {
         LinearLayout row = row();
         for (int i = 0; i < letters.length(); i++) {
             String letter = String.valueOf(letters.charAt(i));
-            Button key = key(letter, v -> commit(letter.toLowerCase()));
-            row.addView(key);
+            row.addView(key(letter, v -> commit(letter.toLowerCase())));
         }
         return row;
     }
@@ -81,8 +109,9 @@ public final class AiKeyboardService extends InputMethodService {
         button.setTextSize(12);
         button.setMinWidth(0);
         button.setMinimumWidth(0);
+        button.setAllCaps(false);
         button.setOnClickListener(listener);
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(46), 1f);
         p.setMargins(dp(1), dp(1), dp(1), dp(1));
         button.setLayoutParams(p);
         return button;
@@ -90,7 +119,7 @@ public final class AiKeyboardService extends InputMethodService {
 
     private Button tool(String text, View.OnClickListener listener) {
         Button button = key(text, listener);
-        button.setTextSize(11);
+        button.setTextSize(10);
         return button;
     }
 
@@ -110,18 +139,15 @@ public final class AiKeyboardService extends InputMethodService {
     }
 
     private void refreshInsight() {
+        CompanionModeStore.Mode mode = CompanionModeStore.get(this);
+        if (modeView != null) modeView.setText("NRV AI · " + CompanionModeStore.title(mode));
+
         ScreenInsightStore.Snapshot snapshot = ScreenInsightStore.read();
         if (insightView != null) {
-            insightView.setText(snapshot.fresh(15_000)
+            insightView.setText(snapshot.fresh(20_000)
                     ? snapshot.text()
-                    : "Нет свежего анализа. Запусти разрешённый захват экрана в NRV Game Agent.");
+                    : "Нет свежего анализа. Выбери режим и нажми «ЭКРАН».");
         }
-    }
-
-    private void openCompanion() {
-        Intent intent = new Intent(this, MainActivity.class);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        startActivity(intent);
     }
 
     private void openPokerLab() {
