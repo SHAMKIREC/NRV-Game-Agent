@@ -20,6 +20,8 @@ import androidx.appcompat.app.AppCompatActivity;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class PokerLabActivity extends AppCompatActivity {
     private EditText heroInput;
@@ -27,8 +29,10 @@ public final class PokerLabActivity extends AppCompatActivity {
     private EditText opponentsInput;
     private TextView resultView;
     private TextView visionView;
+    private Button calculateButton;
 
     private final PokerVisionAnalyzer visionAnalyzer = new PokerVisionAnalyzer();
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
 
     private final ActivityResultLauncher<String> screenshotPicker =
             registerForActivityResult(new ActivityResultContracts.GetContent(), this::analyzeScreenshot);
@@ -38,6 +42,12 @@ public final class PokerLabActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setTitle("Poker Lab");
         setContentView(buildContent());
+    }
+
+    @Override
+    protected void onDestroy() {
+        worker.shutdownNow();
+        super.onDestroy();
     }
 
     private ScrollView buildContent() {
@@ -79,10 +89,10 @@ public final class PokerLabActivity extends AppCompatActivity {
         root.addView(boardInput);
         root.addView(opponentsInput);
 
-        Button calculate = new Button(this);
-        calculate.setText("РАССЧИТАТЬ 20 000 СИМУЛЯЦИЙ");
-        calculate.setOnClickListener(v -> calculate());
-        root.addView(calculate, fullWidth(dp(12)));
+        calculateButton = new Button(this);
+        calculateButton.setText("РАССЧИТАТЬ 20 000 СИМУЛЯЦИЙ");
+        calculateButton.setOnClickListener(v -> calculate());
+        root.addView(calculateButton, fullWidth(dp(12)));
 
         resultView = new TextView(this);
         resultView.setText("Введите карты и нажмите расчёт.");
@@ -95,34 +105,38 @@ public final class PokerLabActivity extends AppCompatActivity {
 
     private void analyzeScreenshot(Uri uri) {
         if (uri == null) return;
-        try (InputStream stream = getContentResolver().openInputStream(uri)) {
-            Bitmap bitmap = BitmapFactory.decodeStream(stream);
-            PokerVisionObservation observation = visionAnalyzer.analyze(bitmap);
+        visionView.setText("Vision: анализирую скриншот…");
+        worker.execute(() -> {
+            try (InputStream stream = getContentResolver().openInputStream(uri)) {
+                Bitmap bitmap = BitmapFactory.decodeStream(stream);
+                PokerVisionObservation observation = visionAnalyzer.analyze(bitmap);
 
-            StringBuilder regions = new StringBuilder();
-            int shown = Math.min(8, observation.regions().size());
-            for (int i = 0; i < shown; i++) {
-                PokerVisionObservation.Region region = observation.regions().get(i);
-                regions.append(String.format(Locale.US,
-                        "\n#%d x=%.2f y=%.2f w=%.2f h=%.2f",
-                        i + 1,
-                        region.centerX(),
-                        region.centerY(),
-                        region.width(),
-                        region.height()));
+                StringBuilder regions = new StringBuilder();
+                int shown = Math.min(8, observation.regions().size());
+                for (int i = 0; i < shown; i++) {
+                    PokerVisionObservation.Region region = observation.regions().get(i);
+                    regions.append(String.format(Locale.US,
+                            "\n#%d x=%.2f y=%.2f w=%.2f h=%.2f",
+                            i + 1,
+                            region.centerX(),
+                            region.centerY(),
+                            region.width(),
+                            region.height()));
+                }
+
+                String text = String.format(Locale.US,
+                        "Vision diagnostics\nКандидатов-карт: %d\nВероятно твои карты: %d/2\nВероятно board: %d/5\nСтадия: %s\nУверенность: %.0f%%%s\n\nРанг и масть появятся после калибровки распознавания под реальные столы.",
+                        observation.cardCandidates(),
+                        observation.likelyHeroCards(),
+                        observation.likelyBoardCards(),
+                        observation.stage(),
+                        observation.confidence() * 100.0,
+                        regions);
+                runOnUiThread(() -> visionView.setText(text));
+            } catch (Exception error) {
+                runOnUiThread(() -> visionView.setText("Не удалось прочитать скриншот: " + error.getMessage()));
             }
-
-            visionView.setText(String.format(Locale.US,
-                    "Vision diagnostics\nКандидатов-карт: %d\nВероятно твои карты: %d/2\nВероятно board: %d/5\nСтадия: %s\nУверенность: %.0f%%%s\n\nСледующий этап: распознавание ранга и масти после калибровочного скриншота.",
-                    observation.cardCandidates(),
-                    observation.likelyHeroCards(),
-                    observation.likelyBoardCards(),
-                    observation.stage(),
-                    observation.confidence() * 100.0,
-                    regions));
-        } catch (Exception error) {
-            visionView.setText("Не удалось прочитать скриншот: " + error.getMessage());
-        }
+        });
     }
 
     private EditText field(String hint) {
@@ -135,20 +149,38 @@ public final class PokerLabActivity extends AppCompatActivity {
     }
 
     private void calculate() {
-        try {
-            List<Card> hero = EquityCalculator.parseCards(heroInput.getText().toString());
-            List<Card> board = EquityCalculator.parseCards(boardInput.getText().toString());
-            int opponents = Integer.parseInt(opponentsInput.getText().toString().trim());
-            EquityCalculator.Result result = new EquityCalculator().calculate(hero, board, opponents, 20_000);
-            resultView.setText(String.format(Locale.US,
-                    "Победа: %.1f%%\nНичья: %.1f%%\nПоражение: %.1f%%\n\nСимуляций: %,d",
-                    result.win() * 100.0,
-                    result.tie() * 100.0,
-                    result.lose() * 100.0,
-                    result.simulations()));
-        } catch (Exception error) {
-            resultView.setText("Ошибка ввода: " + error.getMessage());
-        }
+        final String heroText = heroInput.getText().toString();
+        final String boardText = boardInput.getText().toString();
+        final String opponentsText = opponentsInput.getText().toString().trim();
+
+        calculateButton.setEnabled(false);
+        calculateButton.setText("СЧИТАЮ…");
+        resultView.setText("Идёт локальный расчёт 20 000 симуляций…");
+
+        worker.execute(() -> {
+            try {
+                List<Card> hero = EquityCalculator.parseCards(heroText);
+                List<Card> board = EquityCalculator.parseCards(boardText);
+                int opponents = Integer.parseInt(opponentsText);
+                EquityCalculator.Result result = new EquityCalculator().calculate(hero, board, opponents, 20_000);
+                String text = String.format(Locale.US,
+                        "Победа: %.1f%%\nНичья: %.1f%%\nПоражение: %.1f%%\n\nСимуляций: %,d",
+                        result.win() * 100.0,
+                        result.tie() * 100.0,
+                        result.lose() * 100.0,
+                        result.simulations());
+                runOnUiThread(() -> finishCalculation(text));
+            } catch (Exception error) {
+                runOnUiThread(() -> finishCalculation("Ошибка ввода: " + error.getMessage()));
+            }
+        });
+    }
+
+    private void finishCalculation(String text) {
+        if (isFinishing() || isDestroyed()) return;
+        resultView.setText(text);
+        calculateButton.setEnabled(true);
+        calculateButton.setText("РАССЧИТАТЬ 20 000 СИМУЛЯЦИЙ");
     }
 
     private LinearLayout.LayoutParams fullWidth(int top) {
