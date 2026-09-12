@@ -6,6 +6,8 @@ import android.graphics.Matrix;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 /**
@@ -15,6 +17,7 @@ import java.util.function.Consumer;
 public final class PokerLiveStats {
     private final WorldPokerClubProfile profile = new WorldPokerClubProfile();
     private final WpcCardReader reader = new WpcCardReader();
+    private final ExecutorService equityExecutor = Executors.newSingleThreadExecutor();
 
     public record Snapshot(
             List<Card> hero,
@@ -50,7 +53,7 @@ public final class PokerLiveStats {
         WorldPokerClubProfile.Result table = profile.analyze(landscape);
         int players = table.players();
 
-        reader.read(landscape, cards -> {
+        reader.read(landscape, cards -> equityExecutor.execute(() -> {
             try {
                 List<Card> hero = cards.hero();
                 List<Card> board = cards.board();
@@ -83,7 +86,7 @@ public final class PokerLiveStats {
             } finally {
                 if (landscape != source && !landscape.isRecycled()) landscape.recycle();
             }
-        }, error -> {
+        }), error -> {
             if (landscape != source && !landscape.isRecycled()) landscape.recycle();
             onError.accept(error);
         });
