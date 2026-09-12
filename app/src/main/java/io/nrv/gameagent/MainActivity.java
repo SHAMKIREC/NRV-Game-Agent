@@ -14,9 +14,12 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -29,7 +32,6 @@ import androidx.core.content.ContextCompat;
 import io.nrv.gameagent.capture.CaptureService;
 import io.nrv.gameagent.input.AccessibilityDiagnostics;
 import io.nrv.gameagent.input.AutomationSettings;
-import io.nrv.gameagent.input.GameAccessibilityService;
 import io.nrv.gameagent.poker.PokerLabActivity;
 
 public class MainActivity extends AppCompatActivity {
@@ -73,16 +75,17 @@ public class MainActivity extends AppCompatActivity {
         refreshDiagnostics();
     }
 
-    private LinearLayout buildContent() {
+    private View buildContent() {
         int padding = dp(20);
 
+        ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
         root.setPadding(padding, padding, padding, padding);
-        root.setLayoutParams(new ViewGroup.LayoutParams(
+        scroll.addView(root, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
+                ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
         TextView title = new TextView(this);
@@ -92,7 +95,7 @@ public class MainActivity extends AppCompatActivity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Зрение → решение → управление");
+        subtitle.setText("Зрение → решение → AI companion");
         subtitle.setTextSize(16);
         subtitle.setPadding(0, dp(6), 0, dp(16));
         root.addView(subtitle);
@@ -101,6 +104,22 @@ public class MainActivity extends AppCompatActivity {
         poker.setText("POKER LAB · EQUITY");
         poker.setOnClickListener(v -> startActivity(new Intent(this, PokerLabActivity.class)));
         root.addView(poker, fullWidthParams(0));
+
+        Button keyboardSettings = new Button(this);
+        keyboardSettings.setText("AI KEYBOARD · ВКЛЮЧИТЬ В ANDROID");
+        keyboardSettings.setOnClickListener(v -> {
+            startActivity(new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS));
+            setStatus("Включи NRV AI Keyboard в списке клавиатур Android");
+        });
+        root.addView(keyboardSettings, fullWidthParams(8));
+
+        Button keyboardPicker = new Button(this);
+        keyboardPicker.setText("AI KEYBOARD · ВЫБРАТЬ КЛАВИАТУРУ");
+        keyboardPicker.setOnClickListener(v -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) imm.showInputMethodPicker();
+        });
+        root.addView(keyboardPicker, fullWidthParams(8));
 
         statusView = new TextView(this);
         statusView.setText("Проверяю доступ к управлению…");
@@ -133,7 +152,7 @@ public class MainActivity extends AppCompatActivity {
         root.addView(automationButton, fullWidthParams(12));
 
         Button start = new Button(this);
-        start.setText("3. НАЧАТЬ ЗАХВАТ ЭКРАНА");
+        start.setText("3. НАЧАТЬ РАЗРЕШЁННЫЙ ЗАХВАТ ЭКРАНА");
         start.setOnClickListener(v -> startCapture());
         root.addView(start, fullWidthParams(12));
 
@@ -148,7 +167,7 @@ public class MainActivity extends AppCompatActivity {
         root.addView(stop, fullWidthParams(12));
 
         refreshDiagnostics();
-        return root;
+        return scroll;
     }
 
     private void openAccessibilitySettings() {
