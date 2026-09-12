@@ -7,6 +7,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
@@ -21,6 +22,7 @@ import android.util.Log;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
+import java.nio.ByteBuffer;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -30,7 +32,10 @@ import io.nrv.gameagent.agent.RuleAgent;
 import io.nrv.gameagent.agent.TacticalIntent;
 import io.nrv.gameagent.agent.TacticalPlanner;
 import io.nrv.gameagent.input.GameAccessibilityService;
+import io.nrv.gameagent.keyboard.CompanionModeStore;
 import io.nrv.gameagent.keyboard.ScreenInsightStore;
+import io.nrv.gameagent.poker.PokerVisionAnalyzer;
+import io.nrv.gameagent.poker.PokerVisionObservation;
 import io.nrv.gameagent.vision.EnemyObservation;
 import io.nrv.gameagent.vision.EnemyTracker;
 import io.nrv.gameagent.vision.HudObservation;
@@ -59,6 +64,7 @@ public class CaptureService extends Service {
     private final EnemyTracker enemyTracker = new EnemyTracker();
     private final RuleAgent ruleAgent = new RuleAgent();
     private final TacticalPlanner tacticalPlanner = new TacticalPlanner();
+    private final PokerVisionAnalyzer pokerVisionAnalyzer = new PokerVisionAnalyzer();
 
     @Override
     public void onCreate() {
@@ -132,59 +138,19 @@ public class CaptureService extends Service {
                 if (image == null) return;
 
                 long count = frameCount.incrementAndGet();
-                if (count % ANALYZE_EVERY_N_FRAMES == 0) {
-                    HudObservation rawObservation = hudAnalyzer.analyze(image);
-                    EnemyObservation trackedEnemy = enemyTracker.update(rawObservation.enemies());
-                    HudObservation observation = new HudObservation(
-                            rawObservation.hpRatio(),
-                            rawObservation.manaRatio(),
-                            rawObservation.hpConfidence(),
-                            rawObservation.manaConfidence(),
-                            rawObservation.landscape(),
-                            rawObservation.dead(),
-                            trackedEnemy
-                    );
+                if (count % ANALYZE_EVERY_N_FRAMES != 0) return;
 
-                    GameState gameState = observation.toGameState();
-                    Decision decision = ruleAgent.decide(gameState);
-                    TacticalIntent intentPlan = tacticalPlanner.plan(decision, gameState, trackedEnemy);
-                    boolean gestureSent = GameAccessibilityService.executeIfEnabled(
-                            intentPlan,
-                            captureWidth,
-                            captureHeight
-                    );
+                CompanionModeStore.Mode mode = CompanionModeStore.get(this);
+                String status = switch (mode) {
+                    case POKER -> analyzePoker(image);
+                    case MOBA -> analyzeMoba(image);
+                    case GENERAL -> String.format(Locale.US,
+                            "AI · экран %dx%d · кадр %,d",
+                            image.getWidth(), image.getHeight(), count);
+                };
 
-                    String enemyStatus = trackedEnemy.detected()
-                            ? trackedEnemy.direction().name() + " " + String.format(Locale.US, "%.2f", trackedEnemy.distance())
-                            : "NONE";
-
-                    String status = String.format(
-                            Locale.US,
-                            "HP %.0f%% · E:%s · %s%s",
-                            observation.hpRatio() * 100.0,
-                            enemyStatus,
-                            decision.name(),
-                            gestureSent ? " · INPUT" : ""
-                    );
-
-                    ScreenInsightStore.publish(status);
-                    Log.d(
-                            TAG,
-                            "frames=" + count +
-                                    " hp=" + observation.hpRatio() +
-                                    " mana=" + observation.manaRatio() +
-                                    " enemies=" + trackedEnemy.count() +
-                                    " enemyDir=" + trackedEnemy.direction() +
-                                    " enemyDist=" + trackedEnemy.distance() +
-                                    " decision=" + decision +
-                                    " moveX=" + intentPlan.moveX() +
-                                    " moveY=" + intentPlan.moveY() +
-                                    " attack=" + intentPlan.wantsBasicAttack() +
-                                    " skill=" + intentPlan.wantsSkill() +
-                                    " gestureSent=" + gestureSent
-                    );
-                    updateNotification(status);
-                }
+                ScreenInsightStore.publish(status);
+                updateNotification(status);
             } catch (Exception error) {
                 Log.e(TAG, "Frame processing failed", error);
                 ScreenInsightStore.publish("Ошибка анализа кадра: " + error.getClass().getSimpleName());
@@ -207,9 +173,89 @@ public class CaptureService extends Service {
         Log.i(TAG, "Capture started: " + width + "x" + height + " @" + density);
     }
 
+    private String analyzePoker(Image image) {
+        Bitmap bitmap = imageToBitmap(image);
+        if (bitmap == null) return "POKER · кадр не прочитан";
+        try {
+            PokerVisionObservation observation = pokerVisionAnalyzer.analyze(bitmap);
+            return String.format(
+                    Locale.US,
+                    "POKER · карты:%d · мои:%d · стол:%d · %s · conf %.0f%%",
+                    observation.cardCandidates(),
+                    observation.likelyHeroCards(),
+                    observation.likelyBoardCards(),
+                    observation.stage(),
+                    observation.confidence() * 100.0
+            );
+        } finally {
+            bitmap.recycle();
+        }
+    }
+
+    private String analyzeMoba(Image image) {
+        HudObservation rawObservation = hudAnalyzer.analyze(image);
+        EnemyObservation trackedEnemy = enemyTracker.update(rawObservation.enemies());
+        HudObservation observation = new HudObservation(
+                rawObservation.hpRatio(),
+                rawObservation.manaRatio(),
+                rawObservation.hpConfidence(),
+                rawObservation.manaConfidence(),
+                rawObservation.landscape(),
+                rawObservation.dead(),
+                trackedEnemy
+        );
+
+        GameState gameState = observation.toGameState();
+        Decision decision = ruleAgent.decide(gameState);
+        TacticalIntent intentPlan = tacticalPlanner.plan(decision, gameState, trackedEnemy);
+        boolean gestureSent = GameAccessibilityService.executeIfEnabled(
+                intentPlan,
+                captureWidth,
+                captureHeight
+        );
+
+        String enemyStatus = trackedEnemy.detected()
+                ? trackedEnemy.direction().name() + " " + String.format(Locale.US, "%.2f", trackedEnemy.distance())
+                : "NONE";
+
+        return String.format(
+                Locale.US,
+                "MOBA · HP %.0f%% · E:%s · %s%s",
+                observation.hpRatio() * 100.0,
+                enemyStatus,
+                decision.name(),
+                gestureSent ? " · INPUT" : ""
+        );
+    }
+
+    private Bitmap imageToBitmap(Image image) {
+        if (image == null || image.getPlanes().length == 0) return null;
+        Image.Plane plane = image.getPlanes()[0];
+        int pixelStride = plane.getPixelStride();
+        int rowStride = plane.getRowStride();
+        if (pixelStride <= 0 || rowStride <= 0) return null;
+
+        int rowPadding = rowStride - pixelStride * image.getWidth();
+        int paddedWidth = image.getWidth() + Math.max(0, rowPadding / pixelStride);
+        ByteBuffer buffer = plane.getBuffer().duplicate();
+        buffer.rewind();
+
+        Bitmap padded = Bitmap.createBitmap(
+                paddedWidth,
+                image.getHeight(),
+                Bitmap.Config.ARGB_8888
+        );
+        padded.copyPixelsFromBuffer(buffer);
+        if (paddedWidth == image.getWidth()) return padded;
+
+        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, image.getWidth(), image.getHeight());
+        padded.recycle();
+        return cropped;
+    }
+
     private android.app.Notification buildNotification(String text) {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("NRV Game Agent")
+                .setContentTitle("NRV AI Keyboard")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .setOnlyAlertOnce(true)
@@ -219,16 +265,14 @@ public class CaptureService extends Service {
 
     private void updateNotification(String text) {
         NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager != null) {
-            manager.notify(NOTIFICATION_ID, buildNotification(text));
-        }
+        if (manager != null) manager.notify(NOTIFICATION_ID, buildNotification(text));
     }
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "NRV screen capture",
+                    "NRV screen analysis",
                     NotificationManager.IMPORTANCE_LOW
             );
             NotificationManager manager = getSystemService(NotificationManager.class);
