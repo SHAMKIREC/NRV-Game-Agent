@@ -10,8 +10,8 @@ android {
         applicationId = "io.nrv.gameagent.ai"
         minSdk = 29
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.2.3"
+        versionCode = 7
+        versionName = "0.2.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -36,6 +36,7 @@ dependencies {
     implementation("androidx.core:core:1.17.0")
     implementation("androidx.appcompat:appcompat:1.8.0")
     implementation("com.google.android.material:material:1.13.0")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 
     testImplementation("junit:junit:4.13.2")
 }
