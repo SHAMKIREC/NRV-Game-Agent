@@ -30,6 +30,7 @@ import io.nrv.gameagent.agent.RuleAgent;
 import io.nrv.gameagent.agent.TacticalIntent;
 import io.nrv.gameagent.agent.TacticalPlanner;
 import io.nrv.gameagent.input.GameAccessibilityService;
+import io.nrv.gameagent.keyboard.ScreenInsightStore;
 import io.nrv.gameagent.vision.EnemyObservation;
 import io.nrv.gameagent.vision.EnemyTracker;
 import io.nrv.gameagent.vision.HudObservation;
@@ -73,6 +74,7 @@ public class CaptureService extends Service {
         }
 
         var notification = buildNotification("Получаю кадры экрана для анализа");
+        ScreenInsightStore.publish("Захват экрана активирован. Ожидаю кадры…");
 
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(
@@ -98,6 +100,7 @@ public class CaptureService extends Service {
 
         if (resultData == null || resultCode != Activity.RESULT_OK) {
             Log.e(TAG, "Missing MediaProjection permission data");
+            ScreenInsightStore.publish("Захват экрана не разрешён");
             stopSelf();
             return;
         }
@@ -114,6 +117,7 @@ public class CaptureService extends Service {
             @Override
             public void onStop() {
                 Log.i(TAG, "MediaProjection stopped by system/user");
+                ScreenInsightStore.publish("Захват экрана остановлен");
                 projection = null;
                 cleanupProjection(false);
                 stopSelf();
@@ -163,6 +167,7 @@ public class CaptureService extends Service {
                             gestureSent ? " · INPUT" : ""
                     );
 
+                    ScreenInsightStore.publish(status);
                     Log.d(
                             TAG,
                             "frames=" + count +
@@ -182,6 +187,7 @@ public class CaptureService extends Service {
                 }
             } catch (Exception error) {
                 Log.e(TAG, "Frame processing failed", error);
+                ScreenInsightStore.publish("Ошибка анализа кадра: " + error.getClass().getSimpleName());
             } finally {
                 if (image != null) image.close();
             }
@@ -249,6 +255,7 @@ public class CaptureService extends Service {
     @Override
     public void onDestroy() {
         enemyTracker.reset();
+        ScreenInsightStore.publish("Захват экрана остановлен");
         cleanupProjection(true);
         super.onDestroy();
     }
