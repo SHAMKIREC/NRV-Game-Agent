@@ -30,6 +30,7 @@ import io.nrv.gameagent.capture.CaptureService;
 import io.nrv.gameagent.input.AccessibilityDiagnostics;
 import io.nrv.gameagent.input.AutomationSettings;
 import io.nrv.gameagent.input.GameAccessibilityService;
+import io.nrv.gameagent.poker.PokerLabActivity;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -96,10 +97,15 @@ public class MainActivity extends AppCompatActivity {
         subtitle.setPadding(0, dp(6), 0, dp(16));
         root.addView(subtitle);
 
+        Button poker = new Button(this);
+        poker.setText("POKER LAB · EQUITY");
+        poker.setOnClickListener(v -> startActivity(new Intent(this, PokerLabActivity.class)));
+        root.addView(poker, fullWidthParams(0));
+
         statusView = new TextView(this);
         statusView.setText("Проверяю доступ к управлению…");
         statusView.setTextSize(17);
-        statusView.setPadding(0, 0, 0, dp(12));
+        statusView.setPadding(0, dp(12), 0, dp(12));
         root.addView(statusView);
 
         diagnosticsView = new TextView(this);
@@ -181,9 +187,7 @@ public class MainActivity extends AppCompatActivity {
         if (!enabled && !snapshot.serviceConnected()) {
             setStatus(snapshot.nextStep());
             Toast.makeText(this, snapshot.nextStep(), Toast.LENGTH_LONG).show();
-            if (!snapshot.serviceEnabled()) {
-                openAccessibilitySettings();
-            }
+            if (!snapshot.serviceEnabled()) openAccessibilitySettings();
             return;
         }
 
@@ -194,27 +198,15 @@ public class MainActivity extends AppCompatActivity {
 
     private void refreshDiagnostics() {
         AccessibilityDiagnostics.Snapshot snapshot = AccessibilityDiagnostics.read(this);
-
-        if (diagnosticsView != null) {
-            diagnosticsView.setText(snapshot.summary() + "\n\n" + snapshot.nextStep());
-        }
-
+        if (diagnosticsView != null) diagnosticsView.setText(snapshot.summary() + "\n\n" + snapshot.nextStep());
         if (automationButton != null) {
             boolean enabled = AutomationSettings.isEnabled(this);
-            automationButton.setText(
-                    enabled
-                            ? "2. УПРАВЛЕНИЕ: ВКЛЮЧЕНО"
-                            : snapshot.serviceConnected()
-                                ? "2. ВКЛЮЧИТЬ УПРАВЛЕНИЕ"
-                                : "2. УПРАВЛЕНИЕ: НУЖЕН ДОСТУП"
-            );
+            automationButton.setText(enabled
+                    ? "2. УПРАВЛЕНИЕ: ВКЛЮЧЕНО"
+                    : snapshot.serviceConnected() ? "2. ВКЛЮЧИТЬ УПРАВЛЕНИЕ" : "2. УПРАВЛЕНИЕ: НУЖЕН ДОСТУП");
         }
-
-        if (snapshot.serviceConnected()) {
-            setStatus("Доступ к управлению работает");
-        } else {
-            setStatus(snapshot.nextStep());
-        }
+        if (snapshot.serviceConnected()) setStatus("Доступ к управлению работает");
+        else setStatus(snapshot.nextStep());
     }
 
     private int[] getScreenSize() {
@@ -222,7 +214,6 @@ public class MainActivity extends AppCompatActivity {
             Rect bounds = getWindowManager().getCurrentWindowMetrics().getBounds();
             return new int[]{bounds.width(), bounds.height()};
         }
-
         DisplayMetrics metrics = new DisplayMetrics();
         getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
         return new int[]{metrics.widthPixels, metrics.heightPixels};
@@ -237,18 +228,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 33 &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                        != PackageManager.PERMISSION_GRANTED) {
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1001);
         }
     }
 
-    private void setStatus(String text) {
-        if (statusView != null) statusView.setText(text);
-    }
-
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
+    private void setStatus(String text) { if (statusView != null) statusView.setText(text); }
+    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 }
