@@ -1,5 +1,6 @@
 package io.nrv.gameagent.keyboard;
 
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.inputmethodservice.InputMethodService;
@@ -7,6 +8,7 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -85,6 +87,11 @@ public final class AiKeyboardService extends InputMethodService {
         Intent intent = new Intent(this, KeyboardCaptureActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
         startActivity(intent);
+    }
+
+    private void showInputMethodPicker() {
+        InputMethodManager manager = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (manager != null) manager.showInputMethodPicker();
     }
 
     private LinearLayout letterRow(String letters) {
