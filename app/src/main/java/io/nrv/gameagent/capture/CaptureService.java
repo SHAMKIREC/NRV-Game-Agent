@@ -36,6 +36,7 @@ import androidx.core.app.NotificationCompat;
 
 import java.nio.ByteBuffer;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.nrv.gameagent.agent.Decision;
@@ -43,8 +44,7 @@ import io.nrv.gameagent.agent.GameState;
 import io.nrv.gameagent.agent.RuleAgent;
 import io.nrv.gameagent.keyboard.CompanionModeStore;
 import io.nrv.gameagent.keyboard.ScreenInsightStore;
-import io.nrv.gameagent.poker.PokerVisionAnalyzer;
-import io.nrv.gameagent.poker.PokerVisionObservation;
+import io.nrv.gameagent.poker.PokerLiveStats;
 import io.nrv.gameagent.vision.EnemyObservation;
 import io.nrv.gameagent.vision.EnemyTracker;
 import io.nrv.gameagent.vision.HudObservation;
@@ -61,8 +61,8 @@ public class CaptureService extends Service {
     private static final String TAG = "NRVCapture";
     private static final String CHANNEL_ID = "nrv_capture";
     private static final int NOTIFICATION_ID = 101;
-    private static final int ANALYZE_EVERY_N_FRAMES = 8;
-    private static final int POKER_SAMPLE_MAX_WIDTH = 720;
+    private static final int ANALYZE_EVERY_N_FRAMES = 18;
+    private static final int POKER_SAMPLE_MAX_WIDTH = 1080;
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
@@ -71,7 +71,8 @@ public class CaptureService extends Service {
     private final MlbbHudAnalyzer hudAnalyzer = new MlbbHudAnalyzer();
     private final EnemyTracker enemyTracker = new EnemyTracker();
     private final RuleAgent ruleAgent = new RuleAgent();
-    private final PokerVisionAnalyzer pokerVisionAnalyzer = new PokerVisionAnalyzer();
+    private final PokerLiveStats pokerLiveStats = new PokerLiveStats();
+    private final AtomicBoolean pokerBusy = new AtomicBoolean(false);
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private WindowManager windowManager;
@@ -79,7 +80,8 @@ public class CaptureService extends Service {
     private TextView overlayModeView;
     private TextView overlayStatusView;
     private WindowManager.LayoutParams overlayParams;
-    private volatile double lastPokerConfidence = 0.0;
+    private volatile String lastPokerStatus = "Распознаю карты…";
+    private volatile Double lastPokerWin = null;
 
     @Override
     public void onCreate() {
@@ -95,8 +97,10 @@ public class CaptureService extends Service {
             return START_NOT_STICKY;
         }
 
-        var notification = buildNotification("Анализ экрана запущен");
-        ScreenInsightStore.publish("Анализ экрана запущен. Ожидаю кадры…");
+        // This build is tuned for the user's non-money poker training table.
+        CompanionModeStore.set(this, CompanionModeStore.Mode.POKER);
+        var notification = buildNotification("Покер-анализ запущен");
+        ScreenInsightStore.publish("Покер-анализ запущен. Распознаю карты…");
 
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
@@ -125,6 +129,9 @@ public class CaptureService extends Service {
         cleanupProjection(false);
         enemyTracker.reset();
         frameCount.set(0);
+        pokerBusy.set(false);
+        lastPokerStatus = "Распознаю карты…";
+        lastPokerWin = null;
 
         MediaProjectionManager manager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         projection = manager.getMediaProjection(resultCode, resultData);
@@ -151,7 +158,7 @@ public class CaptureService extends Service {
 
                 CompanionModeStore.Mode mode = CompanionModeStore.get(this);
                 String status = switch (mode) {
-                    case POKER -> analyzePoker(image);
+                    case POKER -> analyzePokerAsync(image);
                     case MOBA -> analyzeMoba(image);
                     case GENERAL -> analyzeGeneral(image, count);
                 };
@@ -183,30 +190,33 @@ public class CaptureService extends Service {
         showOverlay();
     }
 
-    private String analyzePoker(Image image) {
+    private String analyzePokerAsync(Image image) {
+        if (!pokerBusy.compareAndSet(false, true)) return lastPokerStatus;
+
         Bitmap bitmap = imageToSampledBitmap(image, POKER_SAMPLE_MAX_WIDTH);
-        if (bitmap == null) return "Кадр не прочитан";
-        try {
-            PokerVisionObservation o = pokerVisionAnalyzer.analyze(bitmap);
-            lastPokerConfidence = o.confidence();
-            String table = o.tableDetected() ? "найден" : "ищу";
-            String profile = o.worldPokerClubProfile() ? "WPC" : "общий";
-            return String.format(
-                    Locale.US,
-                    "Стол: %s · Игроков: %d\n"
-                            + "Мои карты: %d/2 · Стол: %d/5\n"
-                            + "%s · Профиль: %s · распознано %.0f%%",
-                    table,
-                    o.playersDetected(),
-                    o.likelyHeroCards(),
-                    o.likelyBoardCards(),
-                    o.stage(),
-                    profile,
-                    o.confidence() * 100.0
-            );
-        } finally {
-            bitmap.recycle();
+        if (bitmap == null) {
+            pokerBusy.set(false);
+            return "Не удалось прочитать кадр";
         }
+
+        pokerLiveStats.analyze(bitmap, snapshot -> {
+            lastPokerStatus = snapshot.compactRussian();
+            lastPokerWin = snapshot.win();
+            ScreenInsightStore.publish(lastPokerStatus);
+            updateNotification(lastPokerStatus.replace('\n', ' '));
+            updateOverlay(CompanionModeStore.Mode.POKER, lastPokerStatus);
+            if (!bitmap.isRecycled()) bitmap.recycle();
+            pokerBusy.set(false);
+        }, error -> {
+            Log.e(TAG, "Poker recognition failed", error);
+            lastPokerStatus = "Распознаю карты…";
+            lastPokerWin = null;
+            updateOverlay(CompanionModeStore.Mode.POKER, lastPokerStatus);
+            if (!bitmap.isRecycled()) bitmap.recycle();
+            pokerBusy.set(false);
+        });
+
+        return lastPokerStatus;
     }
 
     private String analyzeMoba(Image image) {
@@ -246,28 +256,28 @@ public class CaptureService extends Service {
             root.setPadding(dp(10), dp(8), dp(7), dp(8));
 
             GradientDrawable background = new GradientDrawable();
-            background.setColor(Color.argb(224, 18, 27, 22));
+            background.setColor(Color.argb(228, 15, 34, 23));
             background.setCornerRadius(dp(14));
-            background.setStroke(dp(1), Color.argb(170, 109, 166, 74));
+            background.setStroke(dp(1), Color.argb(185, 101, 181, 91));
             root.setBackground(background);
 
             LinearLayout textColumn = new LinearLayout(this);
             textColumn.setOrientation(LinearLayout.VERTICAL);
 
             overlayModeView = new TextView(this);
-            overlayModeView.setTextColor(Color.rgb(232, 194, 84));
+            overlayModeView.setTextColor(Color.rgb(239, 201, 84));
             overlayModeView.setTextSize(12);
             overlayModeView.setText("NRV · ПОКЕР");
             textColumn.addView(overlayModeView);
 
             overlayStatusView = new TextView(this);
-            overlayStatusView.setTextColor(Color.WHITE);
+            overlayStatusView.setTextColor(Color.rgb(224, 224, 224));
             overlayStatusView.setTextSize(11);
-            overlayStatusView.setMaxLines(3);
-            overlayStatusView.setText("Распознаю стол…");
+            overlayStatusView.setMaxLines(5);
+            overlayStatusView.setText("Распознаю карты…");
             textColumn.addView(overlayStatusView);
 
-            root.addView(textColumn, new LinearLayout.LayoutParams(dp(250), LinearLayout.LayoutParams.WRAP_CONTENT));
+            root.addView(textColumn, new LinearLayout.LayoutParams(dp(285), LinearLayout.LayoutParams.WRAP_CONTENT));
 
             Button close = new Button(this);
             close.setText("×");
@@ -345,10 +355,10 @@ public class CaptureService extends Service {
             if (overlayStatusView != null) {
                 overlayStatusView.setText(status);
                 if (mode == CompanionModeStore.Mode.POKER) {
-                    if (lastPokerConfidence >= 0.75) {
-                        overlayStatusView.setTextColor(Color.rgb(142, 211, 116));
-                    } else if (lastPokerConfidence >= 0.45) {
-                        overlayStatusView.setTextColor(Color.rgb(236, 199, 91));
+                    if (lastPokerWin != null && lastPokerWin >= 0.60) {
+                        overlayStatusView.setTextColor(Color.rgb(139, 214, 116));
+                    } else if (lastPokerWin != null) {
+                        overlayStatusView.setTextColor(Color.rgb(239, 201, 84));
                     } else {
                         overlayStatusView.setTextColor(Color.rgb(224, 224, 224));
                     }
