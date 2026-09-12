@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
@@ -29,9 +30,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import io.nrv.gameagent.agent.Decision;
 import io.nrv.gameagent.agent.GameState;
 import io.nrv.gameagent.agent.RuleAgent;
-import io.nrv.gameagent.agent.TacticalIntent;
-import io.nrv.gameagent.agent.TacticalPlanner;
-import io.nrv.gameagent.input.GameAccessibilityService;
 import io.nrv.gameagent.keyboard.CompanionModeStore;
 import io.nrv.gameagent.keyboard.ScreenInsightStore;
 import io.nrv.gameagent.poker.PokerVisionAnalyzer;
@@ -53,17 +51,15 @@ public class CaptureService extends Service {
     private static final String CHANNEL_ID = "nrv_capture";
     private static final int NOTIFICATION_ID = 101;
     private static final int ANALYZE_EVERY_N_FRAMES = 8;
+    private static final int POKER_SAMPLE_MAX_WIDTH = 640;
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader imageReader;
-    private int captureWidth = 0;
-    private int captureHeight = 0;
     private final AtomicLong frameCount = new AtomicLong(0);
     private final MlbbHudAnalyzer hudAnalyzer = new MlbbHudAnalyzer();
     private final EnemyTracker enemyTracker = new EnemyTracker();
     private final RuleAgent ruleAgent = new RuleAgent();
-    private final TacticalPlanner tacticalPlanner = new TacticalPlanner();
     private final PokerVisionAnalyzer pokerVisionAnalyzer = new PokerVisionAnalyzer();
 
     @Override
@@ -113,8 +109,7 @@ public class CaptureService extends Service {
 
         cleanupProjection(false);
         enemyTracker.reset();
-        captureWidth = width;
-        captureHeight = height;
+        frameCount.set(0);
 
         MediaProjectionManager manager =
                 (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
@@ -144,9 +139,7 @@ public class CaptureService extends Service {
                 String status = switch (mode) {
                     case POKER -> analyzePoker(image);
                     case MOBA -> analyzeMoba(image);
-                    case GENERAL -> String.format(Locale.US,
-                            "AI · экран %dx%d · кадр %,d",
-                            image.getWidth(), image.getHeight(), count);
+                    case GENERAL -> analyzeGeneral(image, count);
                 };
 
                 ScreenInsightStore.publish(status);
@@ -160,7 +153,7 @@ public class CaptureService extends Service {
         }, null);
 
         virtualDisplay = projection.createVirtualDisplay(
-                "NRV-Game-Agent-Capture",
+                "NRV-AI-Keyboard-Capture",
                 width,
                 height,
                 density,
@@ -174,7 +167,7 @@ public class CaptureService extends Service {
     }
 
     private String analyzePoker(Image image) {
-        Bitmap bitmap = imageToBitmap(image);
+        Bitmap bitmap = imageToSampledBitmap(image, POKER_SAMPLE_MAX_WIDTH);
         if (bitmap == null) return "POKER · кадр не прочитан";
         try {
             PokerVisionObservation observation = pokerVisionAnalyzer.analyze(bitmap);
@@ -207,50 +200,62 @@ public class CaptureService extends Service {
 
         GameState gameState = observation.toGameState();
         Decision decision = ruleAgent.decide(gameState);
-        TacticalIntent intentPlan = tacticalPlanner.plan(decision, gameState, trackedEnemy);
-        boolean gestureSent = GameAccessibilityService.executeIfEnabled(
-                intentPlan,
-                captureWidth,
-                captureHeight
-        );
-
         String enemyStatus = trackedEnemy.detected()
                 ? trackedEnemy.direction().name() + " " + String.format(Locale.US, "%.2f", trackedEnemy.distance())
                 : "NONE";
 
         return String.format(
                 Locale.US,
-                "MOBA · HP %.0f%% · E:%s · %s%s",
+                "MOBA · HP %.0f%% · E:%s · %s",
                 observation.hpRatio() * 100.0,
                 enemyStatus,
-                decision.name(),
-                gestureSent ? " · INPUT" : ""
+                decision.name()
         );
     }
 
-    private Bitmap imageToBitmap(Image image) {
+    private String analyzeGeneral(Image image, long count) {
+        String orientation = image.getWidth() >= image.getHeight() ? "landscape" : "portrait";
+        return String.format(
+                Locale.US,
+                "AI · %s · экран %dx%d · кадр %,d",
+                orientation,
+                image.getWidth(),
+                image.getHeight(),
+                count
+        );
+    }
+
+    private Bitmap imageToSampledBitmap(Image image, int maxWidth) {
         if (image == null || image.getPlanes().length == 0) return null;
         Image.Plane plane = image.getPlanes()[0];
         int pixelStride = plane.getPixelStride();
         int rowStride = plane.getRowStride();
-        if (pixelStride <= 0 || rowStride <= 0) return null;
+        if (pixelStride < 4 || rowStride <= 0) return null;
 
-        int rowPadding = rowStride - pixelStride * image.getWidth();
-        int paddedWidth = image.getWidth() + Math.max(0, rowPadding / pixelStride);
+        int srcWidth = image.getWidth();
+        int srcHeight = image.getHeight();
+        int outWidth = Math.min(srcWidth, maxWidth);
+        int outHeight = Math.max(1, Math.round(srcHeight * (outWidth / (float) srcWidth)));
+        int[] pixels = new int[outWidth * outHeight];
         ByteBuffer buffer = plane.getBuffer().duplicate();
-        buffer.rewind();
+        int limit = buffer.limit();
 
-        Bitmap padded = Bitmap.createBitmap(
-                paddedWidth,
-                image.getHeight(),
-                Bitmap.Config.ARGB_8888
-        );
-        padded.copyPixelsFromBuffer(buffer);
-        if (paddedWidth == image.getWidth()) return padded;
+        for (int y = 0; y < outHeight; y++) {
+            int srcY = Math.min(srcHeight - 1, (int) ((long) y * srcHeight / outHeight));
+            int rowBase = srcY * rowStride;
+            for (int x = 0; x < outWidth; x++) {
+                int srcX = Math.min(srcWidth - 1, (int) ((long) x * srcWidth / outWidth));
+                int offset = rowBase + srcX * pixelStride;
+                if (offset + 3 >= limit) continue;
+                int r = buffer.get(offset) & 0xff;
+                int g = buffer.get(offset + 1) & 0xff;
+                int b = buffer.get(offset + 2) & 0xff;
+                int a = buffer.get(offset + 3) & 0xff;
+                pixels[y * outWidth + x] = Color.argb(a, r, g, b);
+            }
+        }
 
-        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, image.getWidth(), image.getHeight());
-        padded.recycle();
-        return cropped;
+        return Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888);
     }
 
     private android.app.Notification buildNotification(String text) {
@@ -276,7 +281,7 @@ public class CaptureService extends Service {
                     NotificationManager.IMPORTANCE_LOW
             );
             NotificationManager manager = getSystemService(NotificationManager.class);
-            manager.createNotificationChannel(channel);
+            if (manager != null) manager.createNotificationChannel(channel);
         }
     }
 
