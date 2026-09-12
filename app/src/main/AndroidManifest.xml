@@ -14,8 +14,7 @@
         <activity
             android:name=".keyboard.KeyboardCaptureActivity"
             android:exported="false"
-            android:excludeFromRecents="true"
-            android:noHistory="true" />
+            android:excludeFromRecents="true" />
 
         <activity
             android:name=".poker.PokerLabActivity"
