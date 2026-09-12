@@ -14,7 +14,9 @@ public record PokerVisionObservation(
         boolean tableDetected,
         boolean heroZoneDetected,
         boolean boardZoneDetected,
-        int seatActivityCandidates
+        int seatActivityCandidates,
+        boolean worldPokerClubProfile,
+        int playersDetected
 ) {
     public PokerVisionObservation {
         cardCandidates = Math.max(0, cardCandidates);
@@ -24,6 +26,7 @@ public record PokerVisionObservation(
         confidence = Math.max(0.0, Math.min(1.0, confidence));
         captureOrientation = captureOrientation == null ? "unknown" : captureOrientation;
         seatActivityCandidates = Math.max(0, Math.min(10, seatActivityCandidates));
+        playersDetected = Math.max(0, Math.min(9, playersDetected));
     }
 
     /** Compatibility constructor used by older callers/tests. */
@@ -35,28 +38,17 @@ public record PokerVisionObservation(
             double confidence
     ) {
         this(cardCandidates, likelyHeroCards, likelyBoardCards, regions, confidence,
-                "unknown", false, false, false, false, 0);
+                "unknown", false, false, false, false, 0, false, 0);
     }
 
     public String stage() {
         return switch (likelyBoardCards) {
-            case 0 -> "PREFLOP / board not detected";
-            case 3 -> "FLOP";
-            case 4 -> "TURN";
-            case 5 -> "RIVER";
-            default -> "UNKNOWN";
+            case 0 -> "ПРЕФЛОП";
+            case 3 -> "ФЛОП";
+            case 4 -> "ТЁРН";
+            case 5 -> "РИВЕР";
+            default -> "РАСПОЗНАЮ";
         };
-    }
-
-    public String diagnosticLine() {
-        return "table:" + yesNo(tableDetected)
-                + " · hero-zone:" + yesNo(heroZoneDetected)
-                + " · board-zone:" + yesNo(boardZoneDetected)
-                + " · seat-zones:" + seatActivityCandidates;
-    }
-
-    private static String yesNo(boolean value) {
-        return value ? "YES" : "NO";
     }
 
     public record Region(double left, double top, double right, double bottom) {
