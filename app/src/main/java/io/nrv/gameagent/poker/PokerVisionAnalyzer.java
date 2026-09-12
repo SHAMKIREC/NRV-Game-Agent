@@ -2,6 +2,7 @@ package io.nrv.gameagent.poker;
 
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.Matrix;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -10,20 +11,35 @@ import java.util.List;
 
 /**
  * Lightweight offline screenshot analyzer for Poker Lab.
- * It detects bright, card-shaped connected regions without OCR or network calls.
+ * It detects poker-scene structure and bright card-shaped regions without OCR/network calls.
  */
 public final class PokerVisionAnalyzer {
-    private static final int MAX_WIDTH = 640;
+    private static final int MAX_WIDTH = 720;
 
     public PokerVisionObservation analyze(Bitmap source) {
         if (source == null || source.getWidth() < 40 || source.getHeight() < 40) {
-            return new PokerVisionObservation(0, 0, 0, List.of(), 0.0);
+            return new PokerVisionObservation(0, 0, 0, List.of(), 0.0,
+                    "unknown", false, false, false, false, 0);
         }
 
-        Bitmap bitmap = source;
-        if (source.getWidth() > MAX_WIDTH) {
-            int scaledHeight = Math.max(1, Math.round(source.getHeight() * (MAX_WIDTH / (float) source.getWidth())));
-            bitmap = Bitmap.createScaledBitmap(source, MAX_WIDTH, scaledHeight, true);
+        String captureOrientation = source.getWidth() >= source.getHeight() ? "landscape" : "portrait";
+        boolean normalized = false;
+        Bitmap working = source;
+
+        // Poker tables are normally landscape. MediaProjection can keep the dimensions
+        // from the portrait launcher activity even after a game rotates. Normalize here.
+        if (source.getHeight() > source.getWidth()) {
+            Matrix matrix = new Matrix();
+            matrix.postRotate(90f);
+            working = Bitmap.createBitmap(source, 0, 0, source.getWidth(), source.getHeight(), matrix, true);
+            normalized = true;
+        }
+
+        Bitmap bitmap = working;
+        if (working.getWidth() > MAX_WIDTH) {
+            int scaledHeight = Math.max(1, Math.round(working.getHeight() * (MAX_WIDTH / (float) working.getWidth())));
+            bitmap = Bitmap.createScaledBitmap(working, MAX_WIDTH, scaledHeight, true);
+            if (working != source) working.recycle();
         }
 
         int width = bitmap.getWidth();
@@ -40,7 +56,8 @@ public final class PokerVisionAnalyzer {
                 int max = Math.max(r, Math.max(g, b));
                 int min = Math.min(r, Math.min(g, b));
                 int brightness = (r + g + b) / 3;
-                mask[y * width + x] = brightness >= 190 && max - min <= 85;
+                // Broader than before: card backgrounds in games are often warm/cream.
+                mask[y * width + x] = brightness >= 165 && max - min <= 125;
             }
         }
 
@@ -79,10 +96,10 @@ public final class PokerVisionAnalyzer {
                 double aspect = boxWidth / (double) Math.max(1, boxHeight);
                 double fill = count / (double) Math.max(1, boxWidth * boxHeight);
 
-                if (wf >= 0.025 && wf <= 0.16
-                        && hf >= 0.05 && hf <= 0.30
-                        && aspect >= 0.42 && aspect <= 0.95
-                        && fill >= 0.30) {
+                if (wf >= 0.025 && wf <= 0.17
+                        && hf >= 0.07 && hf <= 0.34
+                        && aspect >= 0.38 && aspect <= 1.05
+                        && fill >= 0.20) {
                     regions.add(new PokerVisionObservation.Region(
                             minX / (double) width,
                             minY / (double) height,
@@ -101,18 +118,132 @@ public final class PokerVisionAnalyzer {
         for (PokerVisionObservation.Region region : regions) {
             double cy = region.centerY();
             double cx = region.centerX();
-            if (cy >= 0.62 && cx >= 0.22 && cx <= 0.78) {
+            if (cy >= 0.58 && cy <= 0.90 && cx >= 0.34 && cx <= 0.66) {
                 likelyHero++;
-            } else if (cy >= 0.28 && cy <= 0.68 && cx >= 0.18 && cx <= 0.82) {
+            } else if (cy >= 0.25 && cy <= 0.62 && cx >= 0.25 && cx <= 0.75) {
                 likelyBoard++;
             }
         }
 
         likelyHero = Math.min(2, likelyHero);
         likelyBoard = Math.min(5, likelyBoard);
-        double confidence = regions.isEmpty() ? 0.0 : Math.min(1.0, regions.size() / 7.0);
 
-        return new PokerVisionObservation(regions.size(), likelyHero, likelyBoard, regions, confidence);
+        boolean tableDetected = greenRatio(bitmap, 0.23, 0.18, 0.77, 0.70) >= 0.18;
+        boolean heroZoneDetected = likelyHero > 0
+                || brightRatio(bitmap, 0.34, 0.58, 0.66, 0.90) >= 0.025;
+        boolean boardZoneDetected = likelyBoard > 0
+                || brightRatio(bitmap, 0.25, 0.25, 0.75, 0.62) >= 0.020;
+        int seatActivity = estimateSeatActivity(bitmap);
+
+        double confidence = 0.0;
+        if (tableDetected) confidence += 0.35;
+        if (heroZoneDetected) confidence += 0.25;
+        if (boardZoneDetected) confidence += 0.25;
+        confidence += Math.min(0.15, regions.size() * 0.02);
+
+        if (bitmap != source) bitmap.recycle();
+
+        return new PokerVisionObservation(
+                regions.size(),
+                likelyHero,
+                likelyBoard,
+                regions,
+                confidence,
+                captureOrientation,
+                normalized,
+                tableDetected,
+                heroZoneDetected,
+                boardZoneDetected,
+                seatActivity
+        );
+    }
+
+    private static double greenRatio(Bitmap bitmap, double l, double t, double r, double b) {
+        int x0 = clamp((int) Math.round(l * bitmap.getWidth()), 0, bitmap.getWidth() - 1);
+        int y0 = clamp((int) Math.round(t * bitmap.getHeight()), 0, bitmap.getHeight() - 1);
+        int x1 = clamp((int) Math.round(r * bitmap.getWidth()), x0 + 1, bitmap.getWidth());
+        int y1 = clamp((int) Math.round(b * bitmap.getHeight()), y0 + 1, bitmap.getHeight());
+        int total = 0, green = 0;
+        int step = Math.max(1, bitmap.getWidth() / 360);
+        for (int y = y0; y < y1; y += step) {
+            for (int x = x0; x < x1; x += step) {
+                int c = bitmap.getPixel(x, y);
+                int rr = Color.red(c), gg = Color.green(c), bb = Color.blue(c);
+                total++;
+                if (gg > 70 && gg > rr * 1.10 && gg > bb * 1.08) green++;
+            }
+        }
+        return total == 0 ? 0.0 : green / (double) total;
+    }
+
+    private static double brightRatio(Bitmap bitmap, double l, double t, double r, double b) {
+        int x0 = clamp((int) Math.round(l * bitmap.getWidth()), 0, bitmap.getWidth() - 1);
+        int y0 = clamp((int) Math.round(t * bitmap.getHeight()), 0, bitmap.getHeight() - 1);
+        int x1 = clamp((int) Math.round(r * bitmap.getWidth()), x0 + 1, bitmap.getWidth());
+        int y1 = clamp((int) Math.round(b * bitmap.getHeight()), y0 + 1, bitmap.getHeight());
+        int total = 0, bright = 0;
+        int step = Math.max(1, bitmap.getWidth() / 420);
+        for (int y = y0; y < y1; y += step) {
+            for (int x = x0; x < x1; x += step) {
+                int c = bitmap.getPixel(x, y);
+                int rr = Color.red(c), gg = Color.green(c), bb = Color.blue(c);
+                int max = Math.max(rr, Math.max(gg, bb));
+                int min = Math.min(rr, Math.min(gg, bb));
+                int value = (rr + gg + bb) / 3;
+                total++;
+                if (value >= 155 && max - min <= 150) bright++;
+            }
+        }
+        return total == 0 ? 0.0 : bright / (double) total;
+    }
+
+    /**
+     * Counts visually active zones around the outside of the table. This is intentionally
+     * diagnostic: it is not yet treated as a reliable player count.
+     */
+    private static int estimateSeatActivity(Bitmap bitmap) {
+        double[][] zones = {
+                {0.39, 0.68, 0.61, 0.98}, // bottom / hero
+                {0.08, 0.50, 0.31, 0.82}, // lower-left
+                {0.02, 0.27, 0.23, 0.58}, // left
+                {0.16, 0.02, 0.38, 0.30}, // upper-left
+                {0.62, 0.02, 0.84, 0.30}, // upper-right
+                {0.77, 0.27, 0.98, 0.58}, // right
+                {0.69, 0.50, 0.92, 0.82}, // lower-right
+                {0.40, 0.00, 0.60, 0.24}  // top-center candidate/dealer area
+        };
+        int active = 0;
+        for (double[] z : zones) {
+            double skin = skinRatio(bitmap, z[0], z[1], z[2], z[3]);
+            double bright = brightRatio(bitmap, z[0], z[1], z[2], z[3]);
+            if (skin >= 0.004 || bright >= 0.018) active++;
+        }
+        return active;
+    }
+
+    private static double skinRatio(Bitmap bitmap, double l, double t, double r, double b) {
+        int x0 = clamp((int) Math.round(l * bitmap.getWidth()), 0, bitmap.getWidth() - 1);
+        int y0 = clamp((int) Math.round(t * bitmap.getHeight()), 0, bitmap.getHeight() - 1);
+        int x1 = clamp((int) Math.round(r * bitmap.getWidth()), x0 + 1, bitmap.getWidth());
+        int y1 = clamp((int) Math.round(b * bitmap.getHeight()), y0 + 1, bitmap.getHeight());
+        int total = 0, skin = 0;
+        int step = Math.max(1, bitmap.getWidth() / 420);
+        for (int y = y0; y < y1; y += step) {
+            for (int x = x0; x < x1; x += step) {
+                int c = bitmap.getPixel(x, y);
+                int rr = Color.red(c), gg = Color.green(c), bb = Color.blue(c);
+                total++;
+                if (rr > 80 && gg > 40 && bb > 20 && rr > gg && gg >= bb * 0.75
+                        && (rr - bb) > 20 && (rr - gg) < 110) {
+                    skin++;
+                }
+            }
+        }
+        return total == 0 ? 0.0 : skin / (double) total;
+    }
+
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private static void visit(
