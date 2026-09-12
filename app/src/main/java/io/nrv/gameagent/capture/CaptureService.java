@@ -79,6 +79,7 @@ public class CaptureService extends Service {
     private TextView overlayModeView;
     private TextView overlayStatusView;
     private WindowManager.LayoutParams overlayParams;
+    private volatile double lastPokerConfidence = 0.0;
 
     @Override
     public void onCreate() {
@@ -94,15 +95,11 @@ public class CaptureService extends Service {
             return START_NOT_STICKY;
         }
 
-        var notification = buildNotification("Получаю кадры экрана для анализа");
-        ScreenInsightStore.publish("Захват экрана активирован. Ожидаю кадры…");
+        var notification = buildNotification("Анализ экрана запущен");
+        ScreenInsightStore.publish("Анализ экрана запущен. Ожидаю кадры…");
 
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            );
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
@@ -120,7 +117,6 @@ public class CaptureService extends Service {
         int density = intent.getIntExtra(EXTRA_DENSITY, getResources().getDisplayMetrics().densityDpi);
 
         if (resultData == null || resultCode != Activity.RESULT_OK) {
-            Log.e(TAG, "Missing MediaProjection permission data");
             ScreenInsightStore.publish("Захват экрана не разрешён");
             stopSelf();
             return;
@@ -130,14 +126,12 @@ public class CaptureService extends Service {
         enemyTracker.reset();
         frameCount.set(0);
 
-        MediaProjectionManager manager =
-                (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        MediaProjectionManager manager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         projection = manager.getMediaProjection(resultCode, resultData);
         projection.registerCallback(new MediaProjection.Callback() {
             @Override
             public void onStop() {
-                Log.i(TAG, "MediaProjection stopped by system/user");
-                ScreenInsightStore.publish("Захват экрана остановлен");
+                ScreenInsightStore.publish("Анализ экрана остановлен");
                 projection = null;
                 cleanupProjection(false);
                 hideOverlay();
@@ -163,7 +157,7 @@ public class CaptureService extends Service {
                 };
 
                 ScreenInsightStore.publish(status);
-                updateNotification(status);
+                updateNotification(status.replace('\n', ' '));
                 updateOverlay(mode, status);
             } catch (Exception error) {
                 Log.e(TAG, "Frame processing failed", error);
@@ -187,31 +181,28 @@ public class CaptureService extends Service {
         );
 
         showOverlay();
-        Log.i(TAG, "Capture started: " + width + "x" + height + " @" + density);
     }
 
     private String analyzePoker(Image image) {
         Bitmap bitmap = imageToSampledBitmap(image, POKER_SAMPLE_MAX_WIDTH);
-        if (bitmap == null) return "POKER · кадр не прочитан";
+        if (bitmap == null) return "Кадр не прочитан";
         try {
-            PokerVisionObservation observation = pokerVisionAnalyzer.analyze(bitmap);
-            String rotation = observation.normalizedToLandscape() ? " → landscape" : "";
+            PokerVisionObservation o = pokerVisionAnalyzer.analyze(bitmap);
+            lastPokerConfidence = o.confidence();
+            String table = o.tableDetected() ? "найден" : "ищу";
+            String profile = o.worldPokerClubProfile() ? "WPC" : "общий";
             return String.format(
                     Locale.US,
-                    "table:%s · hero:%s · board:%s · seat-zones:%d\n"
-                            + "cards:%d · hero-cards:%d · board-cards:%d · %s · %.0f%%\n"
-                            + "capture:%s%s",
-                    observation.tableDetected() ? "YES" : "NO",
-                    observation.heroZoneDetected() ? "YES" : "NO",
-                    observation.boardZoneDetected() ? "YES" : "NO",
-                    observation.seatActivityCandidates(),
-                    observation.cardCandidates(),
-                    observation.likelyHeroCards(),
-                    observation.likelyBoardCards(),
-                    observation.stage(),
-                    observation.confidence() * 100.0,
-                    observation.captureOrientation(),
-                    rotation
+                    "Стол: %s · Игроков: %d\n"
+                            + "Мои карты: %d/2 · Стол: %d/5\n"
+                            + "%s · Профиль: %s · распознано %.0f%%",
+                    table,
+                    o.playersDetected(),
+                    o.likelyHeroCards(),
+                    o.likelyBoardCards(),
+                    o.stage(),
+                    profile,
+                    o.confidence() * 100.0
             );
         } finally {
             bitmap.recycle();
@@ -222,40 +213,27 @@ public class CaptureService extends Service {
         HudObservation rawObservation = hudAnalyzer.analyze(image);
         EnemyObservation trackedEnemy = enemyTracker.update(rawObservation.enemies());
         HudObservation observation = new HudObservation(
-                rawObservation.hpRatio(),
-                rawObservation.manaRatio(),
-                rawObservation.hpConfidence(),
-                rawObservation.manaConfidence(),
-                rawObservation.landscape(),
-                rawObservation.dead(),
-                trackedEnemy
+                rawObservation.hpRatio(), rawObservation.manaRatio(),
+                rawObservation.hpConfidence(), rawObservation.manaConfidence(),
+                rawObservation.landscape(), rawObservation.dead(), trackedEnemy
         );
 
         GameState gameState = observation.toGameState();
         Decision decision = ruleAgent.decide(gameState);
         String enemyStatus = trackedEnemy.detected()
                 ? trackedEnemy.direction().name() + " " + String.format(Locale.US, "%.2f", trackedEnemy.distance())
-                : "NONE";
+                : "нет";
 
-        return String.format(
-                Locale.US,
-                "HP %.0f%% · E:%s · %s",
-                observation.hpRatio() * 100.0,
-                enemyStatus,
-                decision.name()
-        );
+        return String.format(Locale.US,
+                "Здоровье: %.0f%%\nПротивник: %s\nРешение: %s",
+                observation.hpRatio() * 100.0, enemyStatus, decision.name());
     }
 
     private String analyzeGeneral(Image image, long count) {
-        String orientation = image.getWidth() >= image.getHeight() ? "landscape" : "portrait";
-        return String.format(
-                Locale.US,
-                "%s · %dx%d · кадр %,d",
-                orientation,
-                image.getWidth(),
-                image.getHeight(),
-                count
-        );
+        String orientation = image.getWidth() >= image.getHeight() ? "альбомный" : "портретный";
+        return String.format(Locale.US,
+                "Экран: %s · %dx%d\nКадр: %,d",
+                orientation, image.getWidth(), image.getHeight(), count);
     }
 
     private void showOverlay() {
@@ -263,53 +241,42 @@ public class CaptureService extends Service {
             if (!Settings.canDrawOverlays(this) || windowManager == null || overlayView != null) return;
 
             LinearLayout root = new LinearLayout(this);
-            root.setOrientation(LinearLayout.VERTICAL);
-            root.setPadding(dp(8), dp(6), dp(6), dp(6));
+            root.setOrientation(LinearLayout.HORIZONTAL);
+            root.setGravity(Gravity.CENTER_VERTICAL);
+            root.setPadding(dp(10), dp(8), dp(7), dp(8));
 
             GradientDrawable background = new GradientDrawable();
-            background.setColor(Color.argb(225, 20, 20, 20));
+            background.setColor(Color.argb(224, 18, 27, 22));
             background.setCornerRadius(dp(14));
+            background.setStroke(dp(1), Color.argb(170, 109, 166, 74));
             root.setBackground(background);
-
-            LinearLayout top = new LinearLayout(this);
-            top.setOrientation(LinearLayout.HORIZONTAL);
-            top.setGravity(Gravity.CENTER_VERTICAL);
 
             LinearLayout textColumn = new LinearLayout(this);
             textColumn.setOrientation(LinearLayout.VERTICAL);
 
             overlayModeView = new TextView(this);
-            overlayModeView.setTextColor(Color.WHITE);
+            overlayModeView.setTextColor(Color.rgb(232, 194, 84));
             overlayModeView.setTextSize(12);
-            overlayModeView.setText("NRV · " + CompanionModeStore.title(CompanionModeStore.get(this)));
+            overlayModeView.setText("NRV · ПОКЕР");
             textColumn.addView(overlayModeView);
 
             overlayStatusView = new TextView(this);
             overlayStatusView.setTextColor(Color.WHITE);
             overlayStatusView.setTextSize(11);
-            overlayStatusView.setMaxLines(4);
-            overlayStatusView.setText("Анализ запущен…");
+            overlayStatusView.setMaxLines(3);
+            overlayStatusView.setText("Распознаю стол…");
             textColumn.addView(overlayStatusView);
 
-            top.addView(textColumn, new LinearLayout.LayoutParams(dp(310), LinearLayout.LayoutParams.WRAP_CONTENT));
+            root.addView(textColumn, new LinearLayout.LayoutParams(dp(250), LinearLayout.LayoutParams.WRAP_CONTENT));
 
             Button close = new Button(this);
             close.setText("×");
-            close.setTextSize(18);
+            close.setTextSize(17);
             close.setMinWidth(0);
             close.setMinimumWidth(0);
             close.setPadding(0, 0, 0, 0);
             close.setOnClickListener(v -> stopSelf());
-            top.addView(close, new LinearLayout.LayoutParams(dp(42), dp(42)));
-            root.addView(top);
-
-            LinearLayout modes = new LinearLayout(this);
-            modes.setOrientation(LinearLayout.HORIZONTAL);
-            modes.setGravity(Gravity.START);
-            modes.addView(modeButton("AI", CompanionModeStore.Mode.GENERAL));
-            modes.addView(modeButton("POKER", CompanionModeStore.Mode.POKER));
-            modes.addView(modeButton("MOBA", CompanionModeStore.Mode.MOBA));
-            root.addView(modes);
+            root.addView(close, new LinearLayout.LayoutParams(dp(40), dp(40)));
 
             overlayParams = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.WRAP_CONTENT,
@@ -323,7 +290,7 @@ public class CaptureService extends Service {
             );
             overlayParams.gravity = Gravity.TOP | Gravity.START;
             overlayParams.x = dp(12);
-            overlayParams.y = dp(60);
+            overlayParams.y = dp(50);
 
             root.setOnTouchListener(new View.OnTouchListener() {
                 private int startX;
@@ -347,13 +314,10 @@ public class CaptureService extends Service {
                             overlayParams.y = startY + Math.round(event.getRawY() - downY);
                             try {
                                 windowManager.updateViewLayout(view, overlayParams);
-                            } catch (Exception ignored) {
-                            }
+                            } catch (Exception ignored) {}
                             return true;
                         }
-                        default -> {
-                            return false;
-                        }
+                        default -> { return false; }
                     }
                 }
             });
@@ -368,36 +332,37 @@ public class CaptureService extends Service {
         });
     }
 
-    private Button modeButton(String label, CompanionModeStore.Mode mode) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setTextSize(9);
-        button.setMinWidth(0);
-        button.setMinimumWidth(0);
-        button.setAllCaps(false);
-        button.setPadding(dp(4), 0, dp(4), 0);
-        button.setOnClickListener(v -> {
-            CompanionModeStore.set(this, mode);
-            if (overlayModeView != null) overlayModeView.setText("NRV · " + CompanionModeStore.title(mode));
-        });
-        return button;
-    }
-
     private void updateOverlay(CompanionModeStore.Mode mode, String status) {
         mainHandler.post(() -> {
             if (overlayView == null) showOverlay();
-            if (overlayModeView != null) overlayModeView.setText("NRV · " + CompanionModeStore.title(mode));
-            if (overlayStatusView != null) overlayStatusView.setText(status);
+            if (overlayModeView != null) {
+                overlayModeView.setText(switch (mode) {
+                    case POKER -> "NRV · ПОКЕР";
+                    case MOBA -> "NRV · MOBA";
+                    case GENERAL -> "NRV · АНАЛИЗ";
+                });
+            }
+            if (overlayStatusView != null) {
+                overlayStatusView.setText(status);
+                if (mode == CompanionModeStore.Mode.POKER) {
+                    if (lastPokerConfidence >= 0.75) {
+                        overlayStatusView.setTextColor(Color.rgb(142, 211, 116));
+                    } else if (lastPokerConfidence >= 0.45) {
+                        overlayStatusView.setTextColor(Color.rgb(236, 199, 91));
+                    } else {
+                        overlayStatusView.setTextColor(Color.rgb(224, 224, 224));
+                    }
+                } else {
+                    overlayStatusView.setTextColor(Color.WHITE);
+                }
+            }
         });
     }
 
     private void hideOverlay() {
         mainHandler.post(() -> {
             if (windowManager != null && overlayView != null) {
-                try {
-                    windowManager.removeView(overlayView);
-                } catch (Exception ignored) {
-                }
+                try { windowManager.removeView(overlayView); } catch (Exception ignored) {}
             }
             overlayView = null;
             overlayModeView = null;
@@ -435,7 +400,6 @@ public class CaptureService extends Service {
                 pixels[y * outWidth + x] = Color.argb(a, r, g, b);
             }
         }
-
         return Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888);
     }
 
@@ -457,10 +421,7 @@ public class CaptureService extends Service {
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID,
-                    "NRV screen analysis",
-                    NotificationManager.IMPORTANCE_LOW
-            );
+                    CHANNEL_ID, "NRV screen analysis", NotificationManager.IMPORTANCE_LOW);
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) manager.createNotificationChannel(channel);
         }
@@ -485,7 +446,7 @@ public class CaptureService extends Service {
     @Override
     public void onDestroy() {
         enemyTracker.reset();
-        ScreenInsightStore.publish("Захват экрана остановлен");
+        ScreenInsightStore.publish("Анализ экрана остановлен");
         hideOverlay();
         cleanupProjection(true);
         super.onDestroy();
