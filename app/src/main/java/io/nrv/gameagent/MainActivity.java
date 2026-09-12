@@ -1,10 +1,8 @@
 package io.nrv.gameagent;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.media.projection.MediaProjectionManager;
@@ -62,7 +60,6 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         projectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        requestNotificationPermissionIfNeeded();
         setContentView(buildContent());
     }
 
@@ -181,14 +178,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         captureLauncher.launch(projectionManager.createScreenCaptureIntent());
-    }
-
-    private void requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 33
-                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1001);
-        }
     }
 
     private void setStatus(String text) {
