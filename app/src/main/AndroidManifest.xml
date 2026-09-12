@@ -12,6 +12,10 @@
         android:theme="@style/Theme.NRVGameAgent">
 
         <activity
+            android:name=".poker.PokerLabActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
