@@ -8,7 +8,13 @@ public record PokerVisionObservation(
         int likelyHeroCards,
         int likelyBoardCards,
         List<Region> regions,
-        double confidence
+        double confidence,
+        String captureOrientation,
+        boolean normalizedToLandscape,
+        boolean tableDetected,
+        boolean heroZoneDetected,
+        boolean boardZoneDetected,
+        int seatActivityCandidates
 ) {
     public PokerVisionObservation {
         cardCandidates = Math.max(0, cardCandidates);
@@ -16,6 +22,20 @@ public record PokerVisionObservation(
         likelyBoardCards = Math.max(0, Math.min(5, likelyBoardCards));
         regions = regions == null ? List.of() : List.copyOf(regions);
         confidence = Math.max(0.0, Math.min(1.0, confidence));
+        captureOrientation = captureOrientation == null ? "unknown" : captureOrientation;
+        seatActivityCandidates = Math.max(0, Math.min(10, seatActivityCandidates));
+    }
+
+    /** Compatibility constructor used by older callers/tests. */
+    public PokerVisionObservation(
+            int cardCandidates,
+            int likelyHeroCards,
+            int likelyBoardCards,
+            List<Region> regions,
+            double confidence
+    ) {
+        this(cardCandidates, likelyHeroCards, likelyBoardCards, regions, confidence,
+                "unknown", false, false, false, false, 0);
     }
 
     public String stage() {
@@ -26,6 +46,17 @@ public record PokerVisionObservation(
             case 5 -> "RIVER";
             default -> "UNKNOWN";
         };
+    }
+
+    public String diagnosticLine() {
+        return "table:" + yesNo(tableDetected)
+                + " · hero-zone:" + yesNo(heroZoneDetected)
+                + " · board-zone:" + yesNo(boardZoneDetected)
+                + " · seat-zones:" + seatActivityCandidates;
+    }
+
+    private static String yesNo(boolean value) {
+        return value ? "YES" : "NO";
     }
 
     public record Region(double left, double top, double right, double bottom) {
