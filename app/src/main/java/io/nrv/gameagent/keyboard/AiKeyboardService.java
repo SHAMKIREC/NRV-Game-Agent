@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.inputmethodservice.InputMethodService;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
@@ -13,6 +15,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import io.nrv.gameagent.capture.CaptureService;
 import io.nrv.gameagent.poker.PokerLabActivity;
 
 /**
@@ -20,8 +23,21 @@ import io.nrv.gameagent.poker.PokerLabActivity;
  * Screen capture is always requested through Android's MediaProjection consent.
  */
 public final class AiKeyboardService extends InputMethodService {
+    private static final long LIVE_REFRESH_MS = 750L;
+
     private TextView insightView;
     private TextView modeView;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean inputViewVisible;
+
+    private final Runnable liveRefresh = new Runnable() {
+        @Override
+        public void run() {
+            if (!inputViewVisible) return;
+            refreshInsight();
+            handler.postDelayed(this, LIVE_REFRESH_MS);
+        }
+    };
 
     @Override
     public View onCreateInputView() {
@@ -53,7 +69,7 @@ public final class AiKeyboardService extends InputMethodService {
         ));
 
         LinearLayout tools = row();
-        tools.addView(tool("ОБНОВИТЬ", v -> refreshInsight()));
+        tools.addView(tool("СТОП", v -> stopScreenCapture()));
         tools.addView(tool("POKER LAB", v -> openPokerLab()));
         tools.addView(tool("⌨", v -> showInputMethodPicker()));
         root.addView(tools);
@@ -75,11 +91,29 @@ public final class AiKeyboardService extends InputMethodService {
     @Override
     public void onStartInputView(android.view.inputmethod.EditorInfo info, boolean restarting) {
         super.onStartInputView(info, restarting);
+        inputViewVisible = true;
+        handler.removeCallbacks(liveRefresh);
         refreshInsight();
+        handler.postDelayed(liveRefresh, LIVE_REFRESH_MS);
+    }
+
+    @Override
+    public void onFinishInputView(boolean finishingInput) {
+        inputViewVisible = false;
+        handler.removeCallbacks(liveRefresh);
+        super.onFinishInputView(finishingInput);
+    }
+
+    @Override
+    public void onDestroy() {
+        inputViewVisible = false;
+        handler.removeCallbacks(liveRefresh);
+        super.onDestroy();
     }
 
     private void setMode(CompanionModeStore.Mode mode) {
         CompanionModeStore.set(this, mode);
+        ScreenInsightStore.publish("Режим переключён: " + CompanionModeStore.title(mode));
         refreshInsight();
     }
 
@@ -87,6 +121,12 @@ public final class AiKeyboardService extends InputMethodService {
         Intent intent = new Intent(this, KeyboardCaptureActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
         startActivity(intent);
+    }
+
+    private void stopScreenCapture() {
+        stopService(new Intent(this, CaptureService.class));
+        ScreenInsightStore.publish("Захват экрана остановлен");
+        refreshInsight();
     }
 
     private void showInputMethodPicker() {
