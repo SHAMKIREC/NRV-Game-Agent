@@ -11,23 +11,22 @@ import java.util.List;
 
 /**
  * Lightweight offline screenshot analyzer for Poker Lab.
- * It detects poker-scene structure and bright card-shaped regions without OCR/network calls.
+ * Uses a calibrated World Poker Club profile first, then generic card detection as fallback.
  */
 public final class PokerVisionAnalyzer {
     private static final int MAX_WIDTH = 720;
+    private final WorldPokerClubProfile worldPokerClubProfile = new WorldPokerClubProfile();
 
     public PokerVisionObservation analyze(Bitmap source) {
         if (source == null || source.getWidth() < 40 || source.getHeight() < 40) {
             return new PokerVisionObservation(0, 0, 0, List.of(), 0.0,
-                    "unknown", false, false, false, false, 0);
+                    "unknown", false, false, false, false, 0, false, 0);
         }
 
         String captureOrientation = source.getWidth() >= source.getHeight() ? "landscape" : "portrait";
         boolean normalized = false;
         Bitmap working = source;
 
-        // Poker tables are normally landscape. MediaProjection can keep the dimensions
-        // from the portrait launcher activity even after a game rotates. Normalize here.
         if (source.getHeight() > source.getWidth()) {
             Matrix matrix = new Matrix();
             matrix.postRotate(90f);
@@ -41,6 +40,8 @@ public final class PokerVisionAnalyzer {
             bitmap = Bitmap.createScaledBitmap(working, MAX_WIDTH, scaledHeight, true);
             if (working != source) working.recycle();
         }
+
+        WorldPokerClubProfile.Result wpc = worldPokerClubProfile.analyze(bitmap);
 
         int width = bitmap.getWidth();
         int height = bitmap.getHeight();
@@ -56,7 +57,6 @@ public final class PokerVisionAnalyzer {
                 int max = Math.max(r, Math.max(g, b));
                 int min = Math.min(r, Math.min(g, b));
                 int brightness = (r + g + b) / 3;
-                // Broader than before: card backgrounds in games are often warm/cream.
                 mask[y * width + x] = brightness >= 165 && max - min <= 125;
             }
         }
@@ -113,40 +113,48 @@ public final class PokerVisionAnalyzer {
         regions.sort(Comparator.comparingDouble(PokerVisionObservation.Region::centerY)
                 .thenComparingDouble(PokerVisionObservation.Region::centerX));
 
-        int likelyHero = 0;
-        int likelyBoard = 0;
+        int genericHero = 0;
+        int genericBoard = 0;
         for (PokerVisionObservation.Region region : regions) {
             double cy = region.centerY();
             double cx = region.centerX();
             if (cy >= 0.58 && cy <= 0.90 && cx >= 0.34 && cx <= 0.66) {
-                likelyHero++;
+                genericHero++;
             } else if (cy >= 0.25 && cy <= 0.62 && cx >= 0.25 && cx <= 0.75) {
-                likelyBoard++;
+                genericBoard++;
             }
         }
 
-        likelyHero = Math.min(2, likelyHero);
-        likelyBoard = Math.min(5, likelyBoard);
+        genericHero = Math.min(2, genericHero);
+        genericBoard = Math.min(5, genericBoard);
 
-        boolean tableDetected = greenRatio(bitmap, 0.23, 0.18, 0.77, 0.70) >= 0.18;
-        boolean heroZoneDetected = likelyHero > 0
+        int heroCards = wpc.matched() ? wpc.heroCards() : genericHero;
+        int boardCards = wpc.matched() ? wpc.boardCards() : genericBoard;
+        boolean tableDetected = wpc.matched() || greenRatio(bitmap, 0.23, 0.18, 0.77, 0.70) >= 0.18;
+        boolean heroZoneDetected = heroCards > 0
                 || brightRatio(bitmap, 0.34, 0.58, 0.66, 0.90) >= 0.025;
-        boolean boardZoneDetected = likelyBoard > 0
+        boolean boardZoneDetected = boardCards > 0
                 || brightRatio(bitmap, 0.25, 0.25, 0.75, 0.62) >= 0.020;
-        int seatActivity = estimateSeatActivity(bitmap);
+        int seatActivity = wpc.matched() ? wpc.players() : estimateSeatActivity(bitmap);
+        int playersDetected = wpc.matched() ? wpc.players() : Math.max(0, Math.min(9, seatActivity));
 
-        double confidence = 0.0;
-        if (tableDetected) confidence += 0.35;
-        if (heroZoneDetected) confidence += 0.25;
-        if (boardZoneDetected) confidence += 0.25;
-        confidence += Math.min(0.15, regions.size() * 0.02);
+        double confidence;
+        if (wpc.matched()) {
+            confidence = wpc.completeness();
+        } else {
+            confidence = 0.0;
+            if (tableDetected) confidence += 0.35;
+            if (heroZoneDetected) confidence += 0.25;
+            if (boardZoneDetected) confidence += 0.25;
+            confidence += Math.min(0.15, regions.size() * 0.02);
+        }
 
         if (bitmap != source) bitmap.recycle();
 
         return new PokerVisionObservation(
                 regions.size(),
-                likelyHero,
-                likelyBoard,
+                heroCards,
+                boardCards,
                 regions,
                 confidence,
                 captureOrientation,
@@ -154,7 +162,9 @@ public final class PokerVisionAnalyzer {
                 tableDetected,
                 heroZoneDetected,
                 boardZoneDetected,
-                seatActivity
+                seatActivity,
+                wpc.matched(),
+                playersDetected
         );
     }
 
@@ -197,26 +207,20 @@ public final class PokerVisionAnalyzer {
         return total == 0 ? 0.0 : bright / (double) total;
     }
 
-    /**
-     * Counts visually active zones around the outside of the table. This is intentionally
-     * diagnostic: it is not yet treated as a reliable player count.
-     */
     private static int estimateSeatActivity(Bitmap bitmap) {
         double[][] zones = {
-                {0.39, 0.68, 0.61, 0.98}, // bottom / hero
-                {0.08, 0.50, 0.31, 0.82}, // lower-left
-                {0.02, 0.27, 0.23, 0.58}, // left
-                {0.16, 0.02, 0.38, 0.30}, // upper-left
-                {0.62, 0.02, 0.84, 0.30}, // upper-right
-                {0.77, 0.27, 0.98, 0.58}, // right
-                {0.69, 0.50, 0.92, 0.82}, // lower-right
-                {0.40, 0.00, 0.60, 0.24}  // top-center candidate/dealer area
+                {0.39, 0.68, 0.61, 0.98},
+                {0.08, 0.50, 0.31, 0.82},
+                {0.02, 0.27, 0.23, 0.58},
+                {0.16, 0.02, 0.38, 0.30},
+                {0.62, 0.02, 0.84, 0.30},
+                {0.77, 0.27, 0.98, 0.58},
+                {0.69, 0.50, 0.92, 0.82}
         };
         int active = 0;
         for (double[] z : zones) {
             double skin = skinRatio(bitmap, z[0], z[1], z[2], z[3]);
-            double bright = brightRatio(bitmap, z[0], z[1], z[2], z[3]);
-            if (skin >= 0.004 || bright >= 0.018) active++;
+            if (skin >= 0.004) active++;
         }
         return active;
     }
@@ -246,12 +250,7 @@ public final class PokerVisionAnalyzer {
         return Math.max(min, Math.min(max, value));
     }
 
-    private static void visit(
-            int index,
-            boolean[] mask,
-            boolean[] seen,
-            ArrayDeque<Integer> queue
-    ) {
+    private static void visit(int index, boolean[] mask, boolean[] seen, ArrayDeque<Integer> queue) {
         if (index < 0 || index >= mask.length || seen[index] || !mask[index]) return;
         seen[index] = true;
         queue.add(index);
