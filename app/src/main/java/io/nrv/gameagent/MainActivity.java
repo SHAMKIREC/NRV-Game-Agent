@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.media.projection.MediaProjectionManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -35,6 +36,7 @@ public class MainActivity extends AppCompatActivity {
 
     private MediaProjectionManager projectionManager;
     private TextView statusView;
+    private boolean pendingCaptureAfterOverlay = false;
 
     private final ActivityResultLauncher<Intent> captureLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -53,7 +55,18 @@ public class MainActivity extends AppCompatActivity {
                 serviceIntent.putExtra(CaptureService.EXTRA_DENSITY, getResources().getDisplayMetrics().densityDpi);
 
                 ContextCompat.startForegroundService(this, serviceIntent);
-                setStatus("Захват активен · режим " + CompanionModeStore.title(CompanionModeStore.get(this)));
+                setStatus("Захват активен · режим " + CompanionModeStore.title(CompanionModeStore.get(this)) + "\nПлавающая панель должна появиться поверх игры.");
+            });
+
+    private final ActivityResultLauncher<Intent> overlayLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (pendingCaptureAfterOverlay && Settings.canDrawOverlays(this)) {
+                    pendingCaptureAfterOverlay = false;
+                    launchCaptureConsent();
+                } else if (pendingCaptureAfterOverlay) {
+                    pendingCaptureAfterOverlay = false;
+                    setStatus("Нужно разрешить «Поверх других приложений», иначе результат не будет виден в игре.");
+                }
             });
 
     @Override
@@ -66,6 +79,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (pendingCaptureAfterOverlay && Settings.canDrawOverlays(this)) {
+            pendingCaptureAfterOverlay = false;
+            launchCaptureConsent();
+        }
         refreshStatus();
     }
 
@@ -89,23 +106,20 @@ public class MainActivity extends AppCompatActivity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Клавиатура + разрешённый анализ экрана · без Accessibility");
+        subtitle.setText("Клавиатура + анализ экрана + плавающая панель · без Accessibility");
         subtitle.setTextSize(16);
         subtitle.setPadding(0, dp(6), 0, dp(16));
         root.addView(subtitle);
 
         TextView setup = new TextView(this);
-        setup.setText("1) Включи NRV AI Keyboard\n2) Выбери её текущей клавиатурой\n3) В клавиатуре выбери POKER / MOBA / AI и нажми ЭКРАН");
+        setup.setText("1) Включи NRV AI Keyboard\n2) Выбери режим\n3) Нажми ЗАПУСТИТЬ АНАЛИЗ\n4) Разреши панель поверх приложений и захват экрана\n5) Вернись в игру — NRV будет виден поверх неё");
         setup.setTextSize(16);
         setup.setPadding(dp(8), dp(8), dp(8), dp(14));
         root.addView(setup, fullWidthParams(0));
 
         Button keyboardSettings = new Button(this);
         keyboardSettings.setText("1. ВКЛЮЧИТЬ NRV AI KEYBOARD");
-        keyboardSettings.setOnClickListener(v -> {
-            startActivity(new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS));
-            setStatus("Включи NRV AI Keyboard в списке клавиатур Android");
-        });
+        keyboardSettings.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)));
         root.addView(keyboardSettings, fullWidthParams(4));
 
         Button keyboardPicker = new Button(this);
@@ -116,13 +130,29 @@ public class MainActivity extends AppCompatActivity {
         });
         root.addView(keyboardPicker, fullWidthParams(8));
 
+        TextView modeTitle = new TextView(this);
+        modeTitle.setText("Режим анализа:");
+        modeTitle.setTextSize(17);
+        modeTitle.setPadding(0, dp(16), 0, dp(6));
+        root.addView(modeTitle, fullWidthParams(0));
+
+        LinearLayout modes = new LinearLayout(this);
+        modes.setOrientation(LinearLayout.HORIZONTAL);
+        Button ai = modeButton("AI", CompanionModeStore.Mode.GENERAL);
+        Button pokerMode = modeButton("POKER", CompanionModeStore.Mode.POKER);
+        Button moba = modeButton("MOBA", CompanionModeStore.Mode.MOBA);
+        modes.addView(ai, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        modes.addView(pokerMode, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        modes.addView(moba, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        root.addView(modes, fullWidthParams(0));
+
         Button poker = new Button(this);
         poker.setText("POKER LAB · ТРЕНИРОВОЧНЫЙ EQUITY");
         poker.setOnClickListener(v -> startActivity(new Intent(this, PokerLabActivity.class)));
         root.addView(poker, fullWidthParams(12));
 
         Button capture = new Button(this);
-        capture.setText("ЗАПУСТИТЬ АНАЛИЗ ЭКРАНА ИЗ ПРИЛОЖЕНИЯ");
+        capture.setText("ЗАПУСТИТЬ АНАЛИЗ + ПАНЕЛЬ ПОВЕРХ ИГРЫ");
         capture.setOnClickListener(v -> startCapture());
         root.addView(capture, fullWidthParams(8));
 
@@ -144,12 +174,23 @@ public class MainActivity extends AppCompatActivity {
         return scroll;
     }
 
+    private Button modeButton(String title, CompanionModeStore.Mode mode) {
+        Button button = new Button(this);
+        button.setText(title);
+        button.setOnClickListener(v -> {
+            CompanionModeStore.set(this, mode);
+            setStatus("Выбран режим: " + CompanionModeStore.title(mode));
+        });
+        return button;
+    }
+
     private void refreshStatus() {
         if (statusView == null) return;
         ScreenInsightStore.Snapshot snapshot = ScreenInsightStore.read();
         String mode = CompanionModeStore.title(CompanionModeStore.get(this));
         String insight = snapshot.fresh(30_000) ? snapshot.text() : "Нет свежего анализа";
-        statusView.setText("Режим: " + mode + "\n" + insight);
+        String overlay = Settings.canDrawOverlays(this) ? "панель разрешена" : "панель ещё не разрешена";
+        statusView.setText("Режим: " + mode + " · " + overlay + "\n" + insight);
     }
 
     private LinearLayout.LayoutParams fullWidthParams(int topMarginDp) {
@@ -177,6 +218,22 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "MediaProjection недоступен", Toast.LENGTH_LONG).show();
             return;
         }
+
+        if (!Settings.canDrawOverlays(this)) {
+            pendingCaptureAfterOverlay = true;
+            setStatus("Сначала разреши NRV показывать маленькую панель поверх игры.");
+            Intent intent = new Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName())
+            );
+            overlayLauncher.launch(intent);
+            return;
+        }
+
+        launchCaptureConsent();
+    }
+
+    private void launchCaptureConsent() {
         captureLauncher.launch(projectionManager.createScreenCaptureIntent());
     }
 
