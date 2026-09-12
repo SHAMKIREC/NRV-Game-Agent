@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.graphics.drawable.GradientDrawable;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.Image;
@@ -17,8 +18,18 @@ import android.media.ImageReader;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.provider.Settings;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -62,10 +73,18 @@ public class CaptureService extends Service {
     private final RuleAgent ruleAgent = new RuleAgent();
     private final PokerVisionAnalyzer pokerVisionAnalyzer = new PokerVisionAnalyzer();
 
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private WindowManager windowManager;
+    private View overlayView;
+    private TextView overlayModeView;
+    private TextView overlayStatusView;
+    private WindowManager.LayoutParams overlayParams;
+
     @Override
     public void onCreate() {
         super.onCreate();
         createChannel();
+        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
     }
 
     @Override
@@ -121,9 +140,10 @@ public class CaptureService extends Service {
                 ScreenInsightStore.publish("Захват экрана остановлен");
                 projection = null;
                 cleanupProjection(false);
+                hideOverlay();
                 stopSelf();
             }
-        }, null);
+        }, mainHandler);
 
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
         imageReader.setOnImageAvailableListener(reader -> {
@@ -144,13 +164,16 @@ public class CaptureService extends Service {
 
                 ScreenInsightStore.publish(status);
                 updateNotification(status);
+                updateOverlay(mode, status);
             } catch (Exception error) {
                 Log.e(TAG, "Frame processing failed", error);
-                ScreenInsightStore.publish("Ошибка анализа кадра: " + error.getClass().getSimpleName());
+                String status = "Ошибка анализа: " + error.getClass().getSimpleName();
+                ScreenInsightStore.publish(status);
+                updateOverlay(CompanionModeStore.get(this), status);
             } finally {
                 if (image != null) image.close();
             }
-        }, null);
+        }, mainHandler);
 
         virtualDisplay = projection.createVirtualDisplay(
                 "NRV-AI-Keyboard-Capture",
@@ -163,6 +186,7 @@ public class CaptureService extends Service {
                 null
         );
 
+        showOverlay();
         Log.i(TAG, "Capture started: " + width + "x" + height + " @" + density);
     }
 
@@ -173,7 +197,7 @@ public class CaptureService extends Service {
             PokerVisionObservation observation = pokerVisionAnalyzer.analyze(bitmap);
             return String.format(
                     Locale.US,
-                    "POKER · карты:%d · мои:%d · стол:%d · %s · conf %.0f%%",
+                    "Карты:%d · мои:%d · стол:%d · %s · %.0f%%",
                     observation.cardCandidates(),
                     observation.likelyHeroCards(),
                     observation.likelyBoardCards(),
@@ -206,7 +230,7 @@ public class CaptureService extends Service {
 
         return String.format(
                 Locale.US,
-                "MOBA · HP %.0f%% · E:%s · %s",
+                "HP %.0f%% · E:%s · %s",
                 observation.hpRatio() * 100.0,
                 enemyStatus,
                 decision.name()
@@ -217,12 +241,133 @@ public class CaptureService extends Service {
         String orientation = image.getWidth() >= image.getHeight() ? "landscape" : "portrait";
         return String.format(
                 Locale.US,
-                "AI · %s · экран %dx%d · кадр %,d",
+                "%s · %dx%d · кадр %,d",
                 orientation,
                 image.getWidth(),
                 image.getHeight(),
                 count
         );
+    }
+
+    private void showOverlay() {
+        mainHandler.post(() -> {
+            if (!Settings.canDrawOverlays(this) || windowManager == null || overlayView != null) return;
+
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.HORIZONTAL);
+            root.setGravity(Gravity.CENTER_VERTICAL);
+            root.setPadding(dp(10), dp(7), dp(6), dp(7));
+
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(Color.argb(220, 20, 20, 20));
+            background.setCornerRadius(dp(14));
+            root.setBackground(background);
+
+            LinearLayout textColumn = new LinearLayout(this);
+            textColumn.setOrientation(LinearLayout.VERTICAL);
+
+            overlayModeView = new TextView(this);
+            overlayModeView.setTextColor(Color.WHITE);
+            overlayModeView.setTextSize(12);
+            overlayModeView.setText("NRV · " + CompanionModeStore.title(CompanionModeStore.get(this)));
+            textColumn.addView(overlayModeView);
+
+            overlayStatusView = new TextView(this);
+            overlayStatusView.setTextColor(Color.WHITE);
+            overlayStatusView.setTextSize(13);
+            overlayStatusView.setMaxLines(2);
+            overlayStatusView.setText("Анализ запущен…");
+            textColumn.addView(overlayStatusView);
+
+            root.addView(textColumn, new LinearLayout.LayoutParams(dp(250), LinearLayout.LayoutParams.WRAP_CONTENT));
+
+            Button close = new Button(this);
+            close.setText("×");
+            close.setTextSize(18);
+            close.setMinWidth(0);
+            close.setMinimumWidth(0);
+            close.setPadding(0, 0, 0, 0);
+            close.setOnClickListener(v -> stopSelf());
+            root.addView(close, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+            overlayParams = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    Build.VERSION.SDK_INT >= 26
+                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                            : WindowManager.LayoutParams.TYPE_PHONE,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT
+            );
+            overlayParams.gravity = Gravity.TOP | Gravity.START;
+            overlayParams.x = dp(12);
+            overlayParams.y = dp(80);
+
+            root.setOnTouchListener(new View.OnTouchListener() {
+                private int startX;
+                private int startY;
+                private float downX;
+                private float downY;
+
+                @Override
+                public boolean onTouch(View view, MotionEvent event) {
+                    if (overlayParams == null || windowManager == null) return false;
+                    switch (event.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN -> {
+                            startX = overlayParams.x;
+                            startY = overlayParams.y;
+                            downX = event.getRawX();
+                            downY = event.getRawY();
+                            return true;
+                        }
+                        case MotionEvent.ACTION_MOVE -> {
+                            overlayParams.x = startX + Math.round(event.getRawX() - downX);
+                            overlayParams.y = startY + Math.round(event.getRawY() - downY);
+                            try {
+                                windowManager.updateViewLayout(view, overlayParams);
+                            } catch (Exception ignored) {
+                            }
+                            return true;
+                        }
+                        default -> {
+                            return false;
+                        }
+                    }
+                }
+            });
+
+            try {
+                windowManager.addView(root, overlayParams);
+                overlayView = root;
+            } catch (Exception error) {
+                Log.e(TAG, "Unable to show overlay", error);
+                ScreenInsightStore.publish("Не удалось показать панель поверх игры");
+            }
+        });
+    }
+
+    private void updateOverlay(CompanionModeStore.Mode mode, String status) {
+        mainHandler.post(() -> {
+            if (overlayView == null) showOverlay();
+            if (overlayModeView != null) overlayModeView.setText("NRV · " + CompanionModeStore.title(mode));
+            if (overlayStatusView != null) overlayStatusView.setText(status);
+        });
+    }
+
+    private void hideOverlay() {
+        mainHandler.post(() -> {
+            if (windowManager != null && overlayView != null) {
+                try {
+                    windowManager.removeView(overlayView);
+                } catch (Exception ignored) {
+                }
+            }
+            overlayView = null;
+            overlayModeView = null;
+            overlayStatusView = null;
+            overlayParams = null;
+        });
     }
 
     private Bitmap imageToSampledBitmap(Image image, int maxWidth) {
@@ -305,6 +450,7 @@ public class CaptureService extends Service {
     public void onDestroy() {
         enemyTracker.reset();
         ScreenInsightStore.publish("Захват экрана остановлен");
+        hideOverlay();
         cleanupProjection(true);
         super.onDestroy();
     }
@@ -313,5 +459,9 @@ public class CaptureService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 }
