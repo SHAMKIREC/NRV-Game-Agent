@@ -11,13 +11,20 @@ import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 /**
- * Combines WPC table geometry, card recognition and Monte-Carlo equity.
- * Designed for a non-money training game.
+ * Combines WPC table geometry, card recognition and local Monte-Carlo equity.
+ * A card set must be seen in two consecutive analysis frames before it is trusted.
  */
 public final class PokerLiveStats {
     private final WorldPokerClubProfile profile = new WorldPokerClubProfile();
     private final WpcCardReader reader = new WpcCardReader();
     private final ExecutorService equityExecutor = Executors.newSingleThreadExecutor();
+
+    private List<Card> candidateHero = List.of();
+    private List<Card> candidateBoard = List.of();
+    private int candidateRepeats = 0;
+    private List<Card> stableHero = List.of();
+    private List<Card> stableBoard = List.of();
+    private int stablePlayers = 0;
 
     public record Snapshot(
             List<Card> hero,
@@ -28,7 +35,8 @@ public final class PokerLiveStats {
             Double win,
             Double tie,
             Double lose,
-            boolean profileMatched
+            boolean profileMatched,
+            boolean cardsStable
     ) {
         public String compactRussian() {
             StringBuilder out = new StringBuilder();
@@ -39,10 +47,12 @@ public final class PokerLiveStats {
             if (handName != null && !handName.isBlank()) out.append(" · ").append(handName);
             if (win != null) {
                 out.append(String.format(Locale.US,
-                        "\nПобеда %.0f%% · Ничья %.0f%% · Проигрыш %.0f%%",
-                        win * 100.0, tie * 100.0, lose * 100.0));
+                        "\nШанс победы %.0f%% · ничья %.0f%%",
+                        win * 100.0, tie * 100.0));
+            } else if (!cardsStable) {
+                out.append("\nПроверяю карты ещё раз…");
             } else {
-                out.append("\nСчитаю после точного чтения карт…");
+                out.append("\nЖду точные карты и игроков…");
             }
             return out.toString();
         }
@@ -51,20 +61,25 @@ public final class PokerLiveStats {
     public void analyze(Bitmap source, Consumer<Snapshot> onSuccess, Consumer<Exception> onError) {
         Bitmap landscape = normalizeLandscape(source);
         WorldPokerClubProfile.Result table = profile.analyze(landscape);
-        int players = table.players();
 
         reader.read(landscape, cards -> equityExecutor.execute(() -> {
             try {
-                List<Card> hero = cards.hero();
-                List<Card> board = cards.board();
-                String stage = stage(board.size());
-                String hand = handName(hero, board);
+                StableRead read = stabilize(cards, table);
+                List<Card> hero = read.hero();
+                List<Card> board = read.board();
+                int players = read.players();
+
+                String stage = stage(board.size(), read.stable());
+                String hand = read.stable() ? handName(hero, board) : "";
 
                 Double win = null, tie = null, lose = null;
-                int opponents = Math.max(1, players - 1);
-                if (hero.size() == 2 && validBoardSize(board.size()) && players >= 2) {
+                if (read.stable()
+                        && hero.size() == 2
+                        && validBoardSize(board.size())
+                        && players >= 2) {
+                    int opponents = Math.max(1, players - 1);
                     EquityCalculator.Result equity = new EquityCalculator()
-                            .calculate(hero, board, opponents, 5_000);
+                            .calculate(hero, board, opponents, 8_000);
                     win = equity.win();
                     tie = equity.tie();
                     lose = equity.lose();
@@ -79,7 +94,8 @@ public final class PokerLiveStats {
                         win,
                         tie,
                         lose,
-                        table.matched()
+                        table.matched(),
+                        read.stable()
                 ));
             } catch (Exception e) {
                 onError.accept(e);
@@ -92,11 +108,65 @@ public final class PokerLiveStats {
         });
     }
 
+    private synchronized StableRead stabilize(WpcCardReader.Result cards, WorldPokerClubProfile.Result table) {
+        if (table.players() >= 2) stablePlayers = table.players();
+
+        int expectedBoard = table.boardCards();
+        List<Card> hero = cards.hero();
+        List<Card> board = cards.board();
+
+        // New hand / board reset: never carry a river from the previous hand into preflop.
+        if (expectedBoard == 0 && !stableBoard.isEmpty()) {
+            stableHero = List.of();
+            stableBoard = List.of();
+            candidateHero = List.of();
+            candidateBoard = List.of();
+            candidateRepeats = 0;
+        }
+
+        boolean countMatches = hero.size() == 2
+                && validBoardSize(board.size())
+                && board.size() == expectedBoard;
+
+        if (!countMatches) {
+            boolean stableStillFits = stableHero.size() == 2
+                    && stableBoard.size() == expectedBoard
+                    && validBoardSize(stableBoard.size());
+            if (stableStillFits) {
+                return new StableRead(stableHero, stableBoard, stablePlayers, true);
+            }
+            return new StableRead(hero, board, stablePlayers, false);
+        }
+
+        if (hero.equals(candidateHero) && board.equals(candidateBoard)) {
+            candidateRepeats++;
+        } else {
+            candidateHero = List.copyOf(hero);
+            candidateBoard = List.copyOf(board);
+            candidateRepeats = 1;
+        }
+
+        if (candidateRepeats >= 2) {
+            stableHero = candidateHero;
+            stableBoard = candidateBoard;
+        }
+
+        boolean stable = stableHero.equals(candidateHero)
+                && stableBoard.equals(candidateBoard)
+                && candidateRepeats >= 2;
+        return stable
+                ? new StableRead(stableHero, stableBoard, stablePlayers, true)
+                : new StableRead(hero, board, stablePlayers, false);
+    }
+
+    private record StableRead(List<Card> hero, List<Card> board, int players, boolean stable) {}
+
     private static boolean validBoardSize(int n) {
         return n == 0 || n == 3 || n == 4 || n == 5;
     }
 
-    private static String stage(int board) {
+    private static String stage(int board, boolean stable) {
+        if (!stable) return "РАСПОЗНАЮ";
         return switch (board) {
             case 0 -> "ПРЕФЛОП";
             case 3 -> "ФЛОП";
