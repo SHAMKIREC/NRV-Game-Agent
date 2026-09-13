@@ -61,7 +61,7 @@ public class CaptureService extends Service {
     private static final String TAG = "NRVCapture";
     private static final String CHANNEL_ID = "nrv_capture";
     private static final int NOTIFICATION_ID = 101;
-    private static final int ANALYZE_EVERY_N_FRAMES = 18;
+    private static final int ANALYZE_EVERY_N_FRAMES = 12;
     private static final int POKER_SAMPLE_MAX_WIDTH = 1080;
 
     private MediaProjection projection;
@@ -97,7 +97,6 @@ public class CaptureService extends Service {
             return START_NOT_STICKY;
         }
 
-        // This build is tuned for the user's non-money poker training table.
         CompanionModeStore.set(this, CompanionModeStore.Mode.POKER);
         var notification = buildNotification("Покер-анализ запущен");
         ScreenInsightStore.publish("Покер-анализ запущен. Распознаю карты…");
@@ -253,11 +252,11 @@ public class CaptureService extends Service {
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.HORIZONTAL);
             root.setGravity(Gravity.CENTER_VERTICAL);
-            root.setPadding(dp(10), dp(8), dp(7), dp(8));
+            root.setPadding(dp(7), dp(6), dp(5), dp(6));
 
             GradientDrawable background = new GradientDrawable();
             background.setColor(Color.argb(228, 15, 34, 23));
-            background.setCornerRadius(dp(14));
+            background.setCornerRadius(dp(12));
             background.setStroke(dp(1), Color.argb(185, 101, 181, 91));
             root.setBackground(background);
 
@@ -266,27 +265,29 @@ public class CaptureService extends Service {
 
             overlayModeView = new TextView(this);
             overlayModeView.setTextColor(Color.rgb(239, 201, 84));
-            overlayModeView.setTextSize(12);
+            overlayModeView.setTextSize(11);
             overlayModeView.setText("NRV · ПОКЕР");
             textColumn.addView(overlayModeView);
 
             overlayStatusView = new TextView(this);
             overlayStatusView.setTextColor(Color.rgb(224, 224, 224));
-            overlayStatusView.setTextSize(11);
-            overlayStatusView.setMaxLines(5);
+            overlayStatusView.setTextSize(10);
+            overlayStatusView.setMaxLines(6);
             overlayStatusView.setText("Распознаю карты…");
             textColumn.addView(overlayStatusView);
 
-            root.addView(textColumn, new LinearLayout.LayoutParams(dp(285), LinearLayout.LayoutParams.WRAP_CONTENT));
+            // Deliberately narrow: on the WPC landscape table this stays to the left
+            // of the community cards, so our own overlay no longer hides rank glyphs.
+            root.addView(textColumn, new LinearLayout.LayoutParams(dp(150), LinearLayout.LayoutParams.WRAP_CONTENT));
 
             Button close = new Button(this);
             close.setText("×");
-            close.setTextSize(17);
+            close.setTextSize(15);
             close.setMinWidth(0);
             close.setMinimumWidth(0);
             close.setPadding(0, 0, 0, 0);
             close.setOnClickListener(v -> stopSelf());
-            root.addView(close, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            root.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
 
             overlayParams = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.WRAP_CONTENT,
@@ -299,8 +300,8 @@ public class CaptureService extends Service {
                     PixelFormat.TRANSLUCENT
             );
             overlayParams.gravity = Gravity.TOP | Gravity.START;
-            overlayParams.x = dp(12);
-            overlayParams.y = dp(50);
+            overlayParams.x = dp(6);
+            overlayParams.y = dp(80);
 
             root.setOnTouchListener(new View.OnTouchListener() {
                 private int startX;
