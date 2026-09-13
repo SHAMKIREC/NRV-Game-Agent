@@ -1,8 +1,10 @@
 package io.nrv.gameagent.poker;
 
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
+import android.graphics.Paint;
 import android.graphics.Rect;
 
 import com.google.mlkit.vision.common.InputImage;
@@ -12,16 +14,11 @@ import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
 
-/**
- * World Poker Club card reader calibrated to the landscape table.
- * Card rank is read from full-frame on-device OCR and only OCR elements whose
- * centres fall inside the known rank corner zones are accepted. This is more
- * reliable than stitching tiny decorative glyph crops into one OCR strip.
- */
 public final class WpcCardReader {
     private static final double[][] HERO = {
             {0.495, 0.575, 0.548, 0.825},
@@ -36,7 +33,12 @@ public final class WpcCardReader {
             {0.579, 0.282, 0.632, 0.510}
     };
 
-    private final TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+    private static final int SHEET_WIDTH = 420;
+    private static final int ROW_HEIGHT = 230;
+    private static final int ROW_PADDING = 20;
+
+    private final TextRecognizer recognizer =
+            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
 
     public record Result(List<Card> hero, List<Card> board, int recognizedSlots) {
         public Result {
@@ -59,22 +61,32 @@ public final class WpcCardReader {
         }
 
         Bitmap landscape = normalizeLandscape(source);
-        List<Slot> slots = new ArrayList<>();
-        for (int i = 0; i < HERO.length; i++) slots.add(new Slot(true, i, HERO[i], crop(landscape, HERO[i])));
-        for (int i = 0; i < BOARD.length; i++) slots.add(new Slot(false, i, BOARD[i], crop(landscape, BOARD[i])));
+        List<Slot> slots = new ArrayList<>(7);
+        for (int i = 0; i < HERO.length; i++) {
+            Bitmap card = crop(landscape, HERO[i]);
+            slots.add(new Slot(true, i, card, cardLooksPresent(card)));
+        }
+        for (int i = 0; i < BOARD.length; i++) {
+            Bitmap card = crop(landscape, BOARD[i]);
+            slots.add(new Slot(false, i, card, cardLooksPresent(card)));
+        }
 
-        recognizer.process(InputImage.fromBitmap(landscape, 0))
+        Bitmap sheet = buildRankSheet(slots);
+        recognizer.process(InputImage.fromBitmap(sheet, 0))
                 .addOnSuccessListener(text -> {
                     try {
-                        List<Card> hero = new ArrayList<>();
-                        List<Card> board = new ArrayList<>();
+                        Card.Rank[] ranks = readRanksFromSheet(text, slots.size());
+                        List<Card> hero = new ArrayList<>(2);
+                        List<Card> board = new ArrayList<>(5);
                         int recognized = 0;
 
-                        for (Slot slot : slots) {
-                            if (!cardLooksPresent(slot.bitmap())) continue;
-                            Card.Rank rank = rankForSlot(text, slot.zone(), landscape.getWidth(), landscape.getHeight());
-                            Card.Suit suit = inferSuit(slot.bitmap());
-                            if (rank == null || suit == null) continue;
+                        for (int i = 0; i < slots.size(); i++) {
+                            Slot slot = slots.get(i);
+                            if (!slot.present()) continue;
+                            Card.Rank rank = ranks[i];
+                            if (rank == null) continue;
+                            Card.Suit suit = inferSuit(slot.bitmap(), rank, slot.hero(), slot.index());
+                            if (suit == null) continue;
 
                             Card card = new Card(rank, suit);
                             recognized++;
@@ -86,43 +98,89 @@ public final class WpcCardReader {
                     } catch (Exception e) {
                         onError.accept(e);
                     } finally {
-                        cleanup(landscape, source, slots);
+                        cleanup(landscape, source, slots, sheet);
                     }
                 })
                 .addOnFailureListener(error -> {
-                    cleanup(landscape, source, slots);
-                    onError.accept(error instanceof Exception ? (Exception) error : new RuntimeException(error));
+                    cleanup(landscape, source, slots, sheet);
+                    onError.accept(error instanceof Exception
+                            ? (Exception) error
+                            : new RuntimeException(error));
                 });
     }
 
-    private static Card.Rank rankForSlot(Text text, double[] zone, int width, int height) {
-        // Only the upper-left rank corner of each physical card is relevant.
-        int x0 = clamp((int) Math.round(zone[0] * width), 0, width - 1);
-        int y0 = clamp((int) Math.round(zone[1] * height), 0, height - 1);
-        int x1 = clamp((int) Math.round((zone[0] + (zone[2] - zone[0]) * 0.48) * width), x0 + 1, width);
-        int y1 = clamp((int) Math.round((zone[1] + (zone[3] - zone[1]) * 0.38) * height), y0 + 1, height);
+    private static Bitmap buildRankSheet(List<Slot> slots) {
+        Bitmap out = Bitmap.createBitmap(
+                SHEET_WIDTH,
+                ROW_HEIGHT * slots.size(),
+                Bitmap.Config.ARGB_8888
+        );
+        Canvas canvas = new Canvas(out);
+        canvas.drawColor(Color.WHITE);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
-        Card.Rank best = null;
-        int bestArea = 0;
+        for (int i = 0; i < slots.size(); i++) {
+            Slot slot = slots.get(i);
+            if (!slot.present()) continue;
+
+            Bitmap card = slot.bitmap();
+            int sw = Math.max(1, (int) Math.round(card.getWidth() * 0.68));
+            int sh = Math.max(1, (int) Math.round(card.getHeight() * 0.48));
+            Rect src = new Rect(0, 0, Math.min(card.getWidth(), sw), Math.min(card.getHeight(), sh));
+
+            int rowTop = i * ROW_HEIGHT;
+            Rect dst = new Rect(
+                    ROW_PADDING,
+                    rowTop + ROW_PADDING,
+                    SHEET_WIDTH - ROW_PADDING,
+                    rowTop + ROW_HEIGHT - ROW_PADDING
+            );
+
+            float cx = dst.exactCenterX();
+            float cy = dst.exactCenterY();
+            canvas.save();
+            if (slot.hero()) {
+                float angle = slot.index() == 0 ? 7.0f : -7.0f;
+                canvas.rotate(angle, cx, cy);
+            }
+            canvas.drawBitmap(card, src, dst, paint);
+            canvas.restore();
+        }
+        return out;
+    }
+
+    private static Card.Rank[] readRanksFromSheet(Text text, int slots) {
+        Card.Rank[] result = new Card.Rank[slots];
+        int[] score = new int[slots];
+        Arrays.fill(score, -1);
+
         for (Text.TextBlock block : text.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
+                acceptRankCandidate(line.getText(), line.getBoundingBox(), result, score);
                 for (Text.Element element : line.getElements()) {
-                    Rect box = element.getBoundingBox();
-                    if (box == null) continue;
-                    int cx = box.centerX();
-                    int cy = box.centerY();
-                    if (cx < x0 || cx >= x1 || cy < y0 || cy >= y1) continue;
-                    Card.Rank rank = parseRank(element.getText());
-                    if (rank == null) continue;
-                    int area = Math.max(1, box.width()) * Math.max(1, box.height());
-                    if (area > bestArea) {
-                        bestArea = area;
-                        best = rank;
-                    }
+                    acceptRankCandidate(element.getText(), element.getBoundingBox(), result, score);
                 }
             }
         }
-        return best;
+        return result;
+    }
+
+    private static void acceptRankCandidate(
+            String raw,
+            Rect box,
+            Card.Rank[] ranks,
+            int[] scores
+    ) {
+        if (box == null) return;
+        Card.Rank rank = parseRank(raw);
+        if (rank == null) return;
+
+        int row = clamp(box.centerY() / ROW_HEIGHT, 0, ranks.length - 1);
+        int area = Math.max(1, box.width()) * Math.max(1, box.height());
+        if (area > scores[row]) {
+            scores[row] = area;
+            ranks[row] = rank;
+        }
     }
 
     private static Card.Rank parseRank(String raw) {
@@ -132,12 +190,16 @@ public final class WpcCardReader {
                 .replace("O", "0")
                 .replace("I", "1")
                 .replace("L", "1")
-                .replace("|", "1");
+                .replace("|", "1")
+                .replace("Z", "2");
+
         if (s.contains("10") || s.equals("T") || s.equals("1O")) return Card.Rank.TEN;
         if (s.equals("A") || s.startsWith("A")) return Card.Rank.ACE;
         if (s.equals("K") || s.startsWith("K")) return Card.Rank.KING;
         if (s.equals("Q") || s.startsWith("Q")) return Card.Rank.QUEEN;
         if (s.equals("J") || s.startsWith("J")) return Card.Rank.JACK;
+        if (s.equals("B")) return Card.Rank.EIGHT;
+        if (s.equals("G")) return Card.Rank.SIX;
         if (s.contains("9")) return Card.Rank.NINE;
         if (s.contains("8")) return Card.Rank.EIGHT;
         if (s.contains("7")) return Card.Rank.SEVEN;
@@ -149,46 +211,159 @@ public final class WpcCardReader {
         return null;
     }
 
-    private static Card.Suit inferSuit(Bitmap card) {
+    private static Card.Suit inferSuit(
+            Bitmap card,
+            Card.Rank rank,
+            boolean hero,
+            int slotIndex
+    ) {
         if (card == null) return null;
-        int w = card.getWidth();
-        int h = card.getHeight();
-        int x0 = Math.max(0, (int) (w * 0.02));
-        int x1 = Math.min(w, Math.max(x0 + 1, (int) (w * 0.60)));
-        int y0 = Math.max(0, (int) (h * 0.25));
-        int y1 = Math.min(h, Math.max(y0 + 1, (int) (h * 0.78)));
+        boolean face = rank == Card.Rank.JACK
+                || rank == Card.Rank.QUEEN
+                || rank == Card.Rank.KING;
 
-        boolean[] mask = new boolean[(x1 - x0) * (y1 - y0)];
-        int red = 0, black = 0, count = 0;
-        for (int y = y0; y < y1; y++) {
-            for (int x = x0; x < x1; x++) {
-                int c = card.getPixel(x, y);
-                int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
-                boolean isRed = r > 110 && r > g * 1.22 && r > b * 1.22;
-                boolean isBlack = r < 110 && g < 110 && b < 110;
-                int mx = x - x0, my = y - y0;
-                mask[my * (x1 - x0) + mx] = isRed || isBlack;
-                if (isRed) red++;
-                if (isBlack) black++;
-                count++;
+        Region region;
+        if (face) {
+            if (hero && slotIndex == 0) {
+                region = new Region(0.26, 0.28, 0.88, 0.72);
+            } else if (hero) {
+                region = new Region(0.02, 0.28, 0.62, 0.72);
+            } else {
+                region = new Region(0.02, 0.30, 0.44, 0.66);
+            }
+        } else {
+            if (hero && slotIndex == 0) {
+                region = new Region(0.25, 0.28, 0.98, 0.96);
+            } else if (hero) {
+                region = new Region(0.08, 0.28, 0.98, 0.96);
+            } else {
+                region = new Region(0.12, 0.28, 0.98, 0.95);
             }
         }
-        if (count == 0 || red + black < count * 0.008) return null;
-        boolean redSuit = red >= black;
 
-        int mw = x1 - x0, mh = y1 - y0;
-        double top = occupancy(mask, mw, mh, 0.0, 0.0, 1.0, 0.34);
-        double middle = occupancy(mask, mw, mh, 0.0, 0.34, 1.0, 0.70);
-        double bottom = occupancy(mask, mw, mh, 0.0, 0.70, 1.0, 1.0);
-        double topCenter = occupancy(mask, mw, mh, 0.30, 0.0, 0.70, 0.35);
+        Component red = largestComponent(card, region, true);
+        Component black = largestComponent(card, region, false);
+        Component chosen;
+        boolean redSuit;
 
-        if (redSuit) {
-            return top > middle * 0.72 || topCenter > 0.27
-                    ? Card.Suit.HEARTS
-                    : Card.Suit.DIAMONDS;
+        if (red == null && black == null) return null;
+        if (black == null || (red != null && red.score() > black.score())) {
+            chosen = red;
+            redSuit = true;
+        } else {
+            chosen = black;
+            redSuit = false;
         }
-        if (topCenter > 0.31 && top >= bottom * 0.68) return Card.Suit.SPADES;
-        return Card.Suit.CLUBS;
+        if (chosen == null) return null;
+
+        if (face) {
+            double ratio = chosen.width() / (double) Math.max(1, chosen.height());
+            if (redSuit) {
+                return ratio < 0.62 ? Card.Suit.DIAMONDS : Card.Suit.HEARTS;
+            }
+            return ratio < 0.62 ? Card.Suit.SPADES : Card.Suit.CLUBS;
+        }
+
+        double topFill = chosen.topFill();
+        if (redSuit) {
+            return topFill > 0.45 ? Card.Suit.HEARTS : Card.Suit.DIAMONDS;
+        }
+        return topFill > 0.32 ? Card.Suit.CLUBS : Card.Suit.SPADES;
+    }
+
+    private static Component largestComponent(Bitmap card, Region r, boolean red) {
+        int w = card.getWidth();
+        int h = card.getHeight();
+        int x0 = clamp((int) Math.round(r.left() * w), 0, w - 1);
+        int y0 = clamp((int) Math.round(r.top() * h), 0, h - 1);
+        int x1 = clamp((int) Math.round(r.right() * w), x0 + 1, w);
+        int y1 = clamp((int) Math.round(r.bottom() * h), y0 + 1, h);
+        int rw = x1 - x0;
+        int rh = y1 - y0;
+
+        boolean[] mask = new boolean[rw * rh];
+        for (int y = 0; y < rh; y++) {
+            for (int x = 0; x < rw; x++) {
+                int c = card.getPixel(x0 + x, y0 + y);
+                int rr = Color.red(c), gg = Color.green(c), bb = Color.blue(c);
+                boolean hit;
+                if (red) {
+                    hit = rr > 120
+                            && gg < 150
+                            && bb < 120
+                            && rr > gg * 1.20
+                            && rr > bb * 1.25;
+                } else {
+                    hit = rr < 105 && gg < 105 && bb < 105;
+                }
+                mask[y * rw + x] = hit;
+            }
+        }
+
+        boolean[] seen = new boolean[mask.length];
+        int[] queue = new int[mask.length];
+        Component best = null;
+
+        for (int start = 0; start < mask.length; start++) {
+            if (!mask[start] || seen[start]) continue;
+            int qHead = 0, qTail = 0;
+            queue[qTail++] = start;
+            seen[start] = true;
+
+            int area = 0;
+            int minX = rw, minY = rh, maxX = -1, maxY = -1;
+            ArrayList<Integer> pixels = new ArrayList<>();
+
+            while (qHead < qTail) {
+                int p = queue[qHead++];
+                pixels.add(p);
+                int px = p % rw;
+                int py = p / rw;
+                area++;
+                minX = Math.min(minX, px);
+                minY = Math.min(minY, py);
+                maxX = Math.max(maxX, px);
+                maxY = Math.max(maxY, py);
+
+                for (int ny = Math.max(0, py - 1); ny <= Math.min(rh - 1, py + 1); ny++) {
+                    for (int nx = Math.max(0, px - 1); nx <= Math.min(rw - 1, px + 1); nx++) {
+                        int np = ny * rw + nx;
+                        if (mask[np] && !seen[np]) {
+                            seen[np] = true;
+                            queue[qTail++] = np;
+                        }
+                    }
+                }
+            }
+
+            int cw = maxX - minX + 1;
+            int ch = maxY - minY + 1;
+            if (area < 18 || cw < 3 || ch < 5) continue;
+            double ratio = cw / (double) ch;
+            if (ratio < 0.16 || ratio > 2.10) continue;
+            if (ch > rh * 0.95) continue;
+
+            int touches = 0;
+            if (minX == 0) touches++;
+            if (minY == 0) touches++;
+            if (maxX == rw - 1) touches++;
+            if (maxY == rh - 1) touches++;
+            double score = area * (1.0 - touches * 0.18);
+
+            int topLimit = minY + Math.max(1, (int) Math.round(ch * 0.20));
+            int topPixels = 0;
+            int topArea = Math.max(1, cw * Math.max(1, topLimit - minY));
+            for (int p : pixels) {
+                int px = p % rw;
+                int py = p / rw;
+                if (px >= minX && px <= maxX && py >= minY && py < topLimit) topPixels++;
+            }
+            double topFill = topPixels / (double) topArea;
+
+            Component c = new Component(area, cw, ch, score, topFill);
+            if (best == null || c.score() > best.score()) best = c;
+        }
+        return best;
     }
 
     private static boolean cardLooksPresent(Bitmap card) {
@@ -209,21 +384,6 @@ public final class WpcCardReader {
         return total > 0 && pale / (double) total > 0.12;
     }
 
-    private static double occupancy(boolean[] mask, int w, int h, double l, double t, double r, double b) {
-        int x0 = Math.max(0, Math.min(w - 1, (int) Math.round(l * w)));
-        int y0 = Math.max(0, Math.min(h - 1, (int) Math.round(t * h)));
-        int x1 = Math.max(x0 + 1, Math.min(w, (int) Math.round(r * w)));
-        int y1 = Math.max(y0 + 1, Math.min(h, (int) Math.round(b * h)));
-        int total = 0, hit = 0;
-        for (int y = y0; y < y1; y++) {
-            for (int x = x0; x < x1; x++) {
-                total++;
-                if (mask[y * w + x]) hit++;
-            }
-        }
-        return total == 0 ? 0 : hit / (double) total;
-    }
-
     private static Bitmap normalizeLandscape(Bitmap source) {
         if (source.getWidth() >= source.getHeight()) return source;
         Matrix matrix = new Matrix();
@@ -239,11 +399,12 @@ public final class WpcCardReader {
         return Bitmap.createBitmap(source, x0, y0, x1 - x0, y1 - y0);
     }
 
-    private static void cleanup(Bitmap landscape, Bitmap source, List<Slot> slots) {
+    private static void cleanup(Bitmap landscape, Bitmap source, List<Slot> slots, Bitmap sheet) {
         for (Slot slot : slots) {
             Bitmap b = slot.bitmap();
             if (b != null && !b.isRecycled()) b.recycle();
         }
+        if (sheet != null && !sheet.isRecycled()) sheet.recycle();
         if (landscape != source && landscape != null && !landscape.isRecycled()) landscape.recycle();
     }
 
@@ -251,5 +412,7 @@ public final class WpcCardReader {
         return Math.max(min, Math.min(max, value));
     }
 
-    private record Slot(boolean hero, int index, double[] zone, Bitmap bitmap) {}
+    private record Slot(boolean hero, int index, Bitmap bitmap, boolean present) {}
+    private record Region(double left, double top, double right, double bottom) {}
+    private record Component(int area, int width, int height, double score, double topFill) {}
 }
