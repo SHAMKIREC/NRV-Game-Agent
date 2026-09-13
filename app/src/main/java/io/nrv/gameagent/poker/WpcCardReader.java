@@ -19,6 +19,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
 
+/**
+ * Card reader for the fixed World Poker Club landscape table.
+ *
+ * Each known card slot is cropped first. Only the printed rank corner is then
+ * enlarged for OCR, so face artwork and large suit symbols cannot be mistaken
+ * for ranks. Suits are classified locally from the card pixels.
+ */
 public final class WpcCardReader {
     private static final double[][] HERO = {
             {0.495, 0.575, 0.548, 0.825},
@@ -124,9 +131,7 @@ public final class WpcCardReader {
             if (!slot.present()) continue;
 
             Bitmap card = slot.bitmap();
-            int sw = Math.max(1, (int) Math.round(card.getWidth() * 0.68));
-            int sh = Math.max(1, (int) Math.round(card.getHeight() * 0.48));
-            Rect src = new Rect(0, 0, Math.min(card.getWidth(), sw), Math.min(card.getHeight(), sh));
+            Rect src = rankSourceRect(card, slot);
 
             int rowTop = i * ROW_HEIGHT;
             Rect dst = new Rect(
@@ -147,6 +152,30 @@ public final class WpcCardReader {
             canvas.restore();
         }
         return out;
+    }
+
+    /**
+     * The broad slot rectangles intentionally include table background because
+     * the hero cards are tilted/overlapped. OCR must therefore use a different
+     * inner rank rectangle for hero-0, hero-1 and upright board cards.
+     */
+    private static Rect rankSourceRect(Bitmap card, Slot slot) {
+        double left;
+        double top;
+        double right;
+        double bottom;
+        if (slot.hero() && slot.index() == 0) {
+            left = 0.29; top = 0.22; right = 0.84; bottom = 0.59;
+        } else if (slot.hero()) {
+            left = 0.14; top = 0.14; right = 0.57; bottom = 0.50;
+        } else {
+            left = 0.00; top = 0.02; right = 0.46; bottom = 0.35;
+        }
+        int x0 = clamp((int) Math.round(left * card.getWidth()), 0, card.getWidth() - 1);
+        int y0 = clamp((int) Math.round(top * card.getHeight()), 0, card.getHeight() - 1);
+        int x1 = clamp((int) Math.round(right * card.getWidth()), x0 + 1, card.getWidth());
+        int y1 = clamp((int) Math.round(bottom * card.getHeight()), y0 + 1, card.getHeight());
+        return new Rect(x0, y0, x1, y1);
     }
 
     private static Card.Rank[] readRanksFromSheet(Text text, int slots) {
@@ -194,6 +223,8 @@ public final class WpcCardReader {
                 .replace("Z", "2");
 
         if (s.contains("10") || s.equals("T") || s.equals("1O")) return Card.Rank.TEN;
+        // The WPC Q glyph often looks like O/0 to OCR. Zero is not a legal rank.
+        if (s.equals("0") || s.equals("D")) return Card.Rank.QUEEN;
         if (s.equals("A") || s.startsWith("A")) return Card.Rank.ACE;
         if (s.equals("K") || s.startsWith("K")) return Card.Rank.KING;
         if (s.equals("Q") || s.startsWith("Q")) return Card.Rank.QUEEN;
