@@ -5,11 +5,11 @@ import android.graphics.Color;
 
 /**
  * Geometry profile calibrated from World Poker Club landscape screenshots.
- * It deliberately separates the dealer NPC from the five player seats.
+ * The table has one hero seat plus four opponent seats; the dealer NPC is ignored.
  */
 public final class WorldPokerClubProfile {
     private static final double[] BOARD_X = {0.390, 0.445, 0.500, 0.555, 0.610};
-    private static final double[] HERO_X = {0.525, 0.575};
+    private static final double[] HERO_X = {0.522, 0.565};
 
     public Result analyze(Bitmap bitmap) {
         if (bitmap == null || bitmap.getWidth() < bitmap.getHeight()) {
@@ -17,44 +17,47 @@ public final class WorldPokerClubProfile {
         }
 
         double tableGreen = greenRatio(bitmap, 0.25, 0.18, 0.75, 0.63);
-        boolean matched = tableGreen >= 0.30;
+        boolean matched = tableGreen >= 0.26;
 
         int board = 0;
         for (double cx : BOARD_X) {
-            if (cardPresent(bitmap, cx - 0.026, 0.285, cx + 0.026, 0.500)) board++;
+            if (cardPresent(bitmap, cx - 0.027, 0.285, cx + 0.027, 0.505)) board++;
         }
 
         int hero = 0;
         for (double cx : HERO_X) {
-            if (cardPresent(bitmap, cx - 0.032, 0.605, cx + 0.032, 0.805)) hero++;
+            if (cardPresent(bitmap, cx - 0.030, 0.585, cx + 0.030, 0.820)) hero++;
         }
 
-        int players = 1; // hero seat
-        if (occupied(bitmap, 0.23, 0.02, 0.42, 0.27)) players++; // upper-left
-        if (occupied(bitmap, 0.60, 0.02, 0.78, 0.27)) players++; // upper-right
-        if (occupied(bitmap, 0.12, 0.43, 0.33, 0.76)) players++; // lower-left
-        if (occupied(bitmap, 0.69, 0.43, 0.89, 0.76)) players++; // lower-right
-
-        if (!matched) players = Math.max(0, players - 1);
+        int players = 0;
+        if (matched) {
+            players = 1; // hero
+            if (occupied(bitmap, 0.23, 0.01, 0.43, 0.28)) players++; // upper-left
+            if (occupied(bitmap, 0.57, 0.01, 0.79, 0.28)) players++; // upper-right
+            if (occupied(bitmap, 0.12, 0.43, 0.35, 0.76)) players++; // lower-left
+            if (occupied(bitmap, 0.66, 0.43, 0.90, 0.76)) players++; // lower-right
+            // A running hand cannot have only the hero. Keep a conservative minimum of heads-up.
+            players = Math.max(2, Math.min(5, players));
+        }
 
         double completeness = 0.0;
         if (matched) completeness += 0.35;
         completeness += Math.min(0.25, hero * 0.125);
         completeness += Math.min(0.30, board * 0.06);
-        if (players > 0) completeness += 0.10;
+        if (players >= 2) completeness += 0.10;
 
         return new Result(matched, hero, board, players, Math.min(1.0, completeness));
     }
 
     private static boolean cardPresent(Bitmap b, double l, double t, double r, double bottom) {
-        double white = paleCardRatio(b, l, t, r, bottom);
-        return white >= 0.20;
+        return paleCardRatio(b, l, t, r, bottom) >= 0.13;
     }
 
     private static boolean occupied(Bitmap b, double l, double t, double r, double bottom) {
         double skin = skinRatio(b, l, t, r, bottom);
         double redBack = redRatio(b, l, t, r, bottom);
-        return skin >= 0.010 || redBack >= 0.006;
+        double pale = paleCardRatio(b, l, t, r, bottom);
+        return skin >= 0.005 || redBack >= 0.0035 || pale >= 0.018;
     }
 
     private static double paleCardRatio(Bitmap b, double l, double t, double r, double bottom) {
@@ -62,24 +65,24 @@ public final class WorldPokerClubProfile {
             int max = Math.max(rr, Math.max(gg, bb));
             int min = Math.min(rr, Math.min(gg, bb));
             int brightness = (rr + gg + bb) / 3;
-            return brightness >= 170 && max - min <= 110;
+            return brightness >= 165 && max - min <= 125;
         });
     }
 
     private static double greenRatio(Bitmap b, double l, double t, double r, double bottom) {
         return ratio(b, l, t, r, bottom,
-                (rr, gg, bb) -> gg > 70 && gg > rr * 1.12 && gg > bb * 1.08);
+                (rr, gg, bb) -> gg > 65 && gg > rr * 1.10 && gg > bb * 1.06);
     }
 
     private static double skinRatio(Bitmap b, double l, double t, double r, double bottom) {
         return ratio(b, l, t, r, bottom, (rr, gg, bb) ->
-                rr > 85 && gg > 45 && bb > 25 && rr > gg && gg >= bb * 0.72
-                        && rr - bb > 20 && rr - gg < 120);
+                rr > 80 && gg > 40 && bb > 20 && rr > gg && gg >= bb * 0.68
+                        && rr - bb > 18 && rr - gg < 130);
     }
 
     private static double redRatio(Bitmap b, double l, double t, double r, double bottom) {
         return ratio(b, l, t, r, bottom,
-                (rr, gg, bb) -> rr > 120 && rr > gg * 1.35 && rr > bb * 1.35);
+                (rr, gg, bb) -> rr > 115 && rr > gg * 1.28 && rr > bb * 1.28);
     }
 
     private static double ratio(Bitmap b, double l, double t, double r, double bottom, PixelRule rule) {
@@ -87,7 +90,7 @@ public final class WorldPokerClubProfile {
         int y0 = clamp((int) Math.round(t * b.getHeight()), 0, b.getHeight() - 1);
         int x1 = clamp((int) Math.round(r * b.getWidth()), x0 + 1, b.getWidth());
         int y1 = clamp((int) Math.round(bottom * b.getHeight()), y0 + 1, b.getHeight());
-        int step = Math.max(1, b.getWidth() / 500);
+        int step = Math.max(1, b.getWidth() / 600);
         int total = 0;
         int hits = 0;
         for (int y = y0; y < y1; y += step) {
