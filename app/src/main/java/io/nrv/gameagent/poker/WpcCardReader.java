@@ -1,10 +1,8 @@
 package io.nrv.gameagent.poker;
 
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
-import android.graphics.Paint;
 import android.graphics.Rect;
 
 import com.google.mlkit.vision.common.InputImage;
@@ -14,19 +12,17 @@ import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * Card reader calibrated for the World Poker Club landscape table.
- * Rank OCR is fully on-device; suit is inferred from the card glyph.
+ * World Poker Club card reader calibrated to the landscape table.
+ * Card rank is read from full-frame on-device OCR and only OCR elements whose
+ * centres fall inside the known rank corner zones are accepted. This is more
+ * reliable than stitching tiny decorative glyph crops into one OCR strip.
  */
 public final class WpcCardReader {
-    // Tight crops around the two visible hero cards. They overlap visually, so the
-    // second crop starts slightly before the first one ends to preserve the rank corner.
     private static final double[][] HERO = {
             {0.495, 0.575, 0.548, 0.825},
             {0.540, 0.565, 0.602, 0.825}
@@ -64,44 +60,19 @@ public final class WpcCardReader {
 
         Bitmap landscape = normalizeLandscape(source);
         List<Slot> slots = new ArrayList<>();
-        for (int i = 0; i < HERO.length; i++) slots.add(new Slot(true, i, crop(landscape, HERO[i])));
-        for (int i = 0; i < BOARD.length; i++) slots.add(new Slot(false, i, crop(landscape, BOARD[i])));
+        for (int i = 0; i < HERO.length; i++) slots.add(new Slot(true, i, HERO[i], crop(landscape, HERO[i])));
+        for (int i = 0; i < BOARD.length; i++) slots.add(new Slot(false, i, BOARD[i], crop(landscape, BOARD[i])));
 
-        final int cellW = 112;
-        final int cellH = 144;
-        Bitmap strip = Bitmap.createBitmap(cellW * slots.size(), cellH, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(strip);
-        canvas.drawColor(Color.WHITE);
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-
-        for (int i = 0; i < slots.size(); i++) {
-            Bitmap rankCrop = rankCrop(slots.get(i).bitmap());
-            Bitmap prepared = prepareRankForOcr(rankCrop);
-            Rect dst = new Rect(i * cellW + 10, 8, (i + 1) * cellW - 10, cellH - 8);
-            canvas.drawBitmap(prepared, null, dst, paint);
-
-            // A visible divider prevents ML Kit from merging glyphs from neighbour cards.
-            paint.setColor(Color.rgb(225, 225, 225));
-            paint.setStrokeWidth(2f);
-            canvas.drawLine((i + 1) * cellW - 1, 0, (i + 1) * cellW - 1, cellH, paint);
-            paint.setColor(Color.BLACK);
-
-            if (prepared != rankCrop && !prepared.isRecycled()) prepared.recycle();
-            if (rankCrop != slots.get(i).bitmap() && !rankCrop.isRecycled()) rankCrop.recycle();
-        }
-
-        recognizer.process(InputImage.fromBitmap(strip, 0))
+        recognizer.process(InputImage.fromBitmap(landscape, 0))
                 .addOnSuccessListener(text -> {
                     try {
-                        Map<Integer, Card.Rank> ranks = mapRanks(text, cellW, slots.size());
                         List<Card> hero = new ArrayList<>();
                         List<Card> board = new ArrayList<>();
                         int recognized = 0;
 
-                        for (int i = 0; i < slots.size(); i++) {
-                            Slot slot = slots.get(i);
+                        for (Slot slot : slots) {
                             if (!cardLooksPresent(slot.bitmap())) continue;
-                            Card.Rank rank = ranks.get(i);
+                            Card.Rank rank = rankForSlot(text, slot.zone(), landscape.getWidth(), landscape.getHeight());
                             Card.Suit suit = inferSuit(slot.bitmap());
                             if (rank == null || suit == null) continue;
 
@@ -115,29 +86,43 @@ public final class WpcCardReader {
                     } catch (Exception e) {
                         onError.accept(e);
                     } finally {
-                        cleanup(strip, landscape, source, slots);
+                        cleanup(landscape, source, slots);
                     }
                 })
                 .addOnFailureListener(error -> {
-                    cleanup(strip, landscape, source, slots);
+                    cleanup(landscape, source, slots);
                     onError.accept(error instanceof Exception ? (Exception) error : new RuntimeException(error));
                 });
     }
 
-    private static Map<Integer, Card.Rank> mapRanks(Text text, int cellW, int slots) {
-        Map<Integer, Card.Rank> out = new HashMap<>();
+    private static Card.Rank rankForSlot(Text text, double[] zone, int width, int height) {
+        // Only the upper-left rank corner of each physical card is relevant.
+        int x0 = clamp((int) Math.round(zone[0] * width), 0, width - 1);
+        int y0 = clamp((int) Math.round(zone[1] * height), 0, height - 1);
+        int x1 = clamp((int) Math.round((zone[0] + (zone[2] - zone[0]) * 0.48) * width), x0 + 1, width);
+        int y1 = clamp((int) Math.round((zone[1] + (zone[3] - zone[1]) * 0.38) * height), y0 + 1, height);
+
+        Card.Rank best = null;
+        int bestArea = 0;
         for (Text.TextBlock block : text.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
                 for (Text.Element element : line.getElements()) {
                     Rect box = element.getBoundingBox();
                     if (box == null) continue;
-                    int slot = Math.max(0, Math.min(slots - 1, box.centerX() / cellW));
+                    int cx = box.centerX();
+                    int cy = box.centerY();
+                    if (cx < x0 || cx >= x1 || cy < y0 || cy >= y1) continue;
                     Card.Rank rank = parseRank(element.getText());
-                    if (rank != null) out.putIfAbsent(slot, rank);
+                    if (rank == null) continue;
+                    int area = Math.max(1, box.width()) * Math.max(1, box.height());
+                    if (area > bestArea) {
+                        bestArea = area;
+                        best = rank;
+                    }
                 }
             }
         }
-        return out;
+        return best;
     }
 
     private static Card.Rank parseRank(String raw) {
@@ -149,45 +134,19 @@ public final class WpcCardReader {
                 .replace("L", "1")
                 .replace("|", "1");
         if (s.contains("10") || s.equals("T") || s.equals("1O")) return Card.Rank.TEN;
-        if (s.contains("A")) return Card.Rank.ACE;
-        if (s.contains("K")) return Card.Rank.KING;
-        if (s.contains("Q")) return Card.Rank.QUEEN;
-        if (s.contains("J")) return Card.Rank.JACK;
+        if (s.equals("A") || s.startsWith("A")) return Card.Rank.ACE;
+        if (s.equals("K") || s.startsWith("K")) return Card.Rank.KING;
+        if (s.equals("Q") || s.startsWith("Q")) return Card.Rank.QUEEN;
+        if (s.equals("J") || s.startsWith("J")) return Card.Rank.JACK;
         if (s.contains("9")) return Card.Rank.NINE;
         if (s.contains("8")) return Card.Rank.EIGHT;
         if (s.contains("7")) return Card.Rank.SEVEN;
         if (s.contains("6")) return Card.Rank.SIX;
-        if (s.contains("5") || s.contains("S")) return Card.Rank.FIVE;
+        if (s.contains("5") || s.equals("S")) return Card.Rank.FIVE;
         if (s.contains("4")) return Card.Rank.FOUR;
         if (s.contains("3")) return Card.Rank.THREE;
         if (s.contains("2")) return Card.Rank.TWO;
         return null;
-    }
-
-    private static Bitmap rankCrop(Bitmap card) {
-        int w = card.getWidth();
-        int h = card.getHeight();
-        int cw = Math.max(1, (int) Math.round(w * 0.48));
-        int ch = Math.max(1, (int) Math.round(h * 0.34));
-        return Bitmap.createBitmap(card, 0, 0, Math.min(cw, w), Math.min(ch, h));
-    }
-
-    /** Convert the decorative WPC rank glyph to a clean black-on-white OCR image. */
-    private static Bitmap prepareRankForOcr(Bitmap source) {
-        int w = source.getWidth();
-        int h = source.getHeight();
-        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                int c = source.getPixel(x, y);
-                int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
-                int brightness = (r + g + b) / 3;
-                boolean redInk = r > 110 && r > g * 1.18 && r > b * 1.18;
-                boolean darkInk = brightness < 145;
-                out.setPixel(x, y, (redInk || darkInk) ? Color.BLACK : Color.WHITE);
-            }
-        }
-        return out;
     }
 
     private static Card.Suit inferSuit(Bitmap card) {
@@ -195,9 +154,9 @@ public final class WpcCardReader {
         int w = card.getWidth();
         int h = card.getHeight();
         int x0 = Math.max(0, (int) (w * 0.02));
-        int x1 = Math.min(w, Math.max(x0 + 1, (int) (w * 0.58)));
-        int y0 = Math.max(0, (int) (h * 0.28));
-        int y1 = Math.min(h, Math.max(y0 + 1, (int) (h * 0.76)));
+        int x1 = Math.min(w, Math.max(x0 + 1, (int) (w * 0.60)));
+        int y0 = Math.max(0, (int) (h * 0.25));
+        int y1 = Math.min(h, Math.max(y0 + 1, (int) (h * 0.78)));
 
         boolean[] mask = new boolean[(x1 - x0) * (y1 - y0)];
         int red = 0, black = 0, count = 0;
@@ -280,8 +239,7 @@ public final class WpcCardReader {
         return Bitmap.createBitmap(source, x0, y0, x1 - x0, y1 - y0);
     }
 
-    private static void cleanup(Bitmap strip, Bitmap landscape, Bitmap source, List<Slot> slots) {
-        if (strip != null && !strip.isRecycled()) strip.recycle();
+    private static void cleanup(Bitmap landscape, Bitmap source, List<Slot> slots) {
         for (Slot slot : slots) {
             Bitmap b = slot.bitmap();
             if (b != null && !b.isRecycled()) b.recycle();
@@ -293,5 +251,5 @@ public final class WpcCardReader {
         return Math.max(min, Math.min(max, value));
     }
 
-    private record Slot(boolean hero, int index, Bitmap bitmap) {}
+    private record Slot(boolean hero, int index, double[] zone, Bitmap bitmap) {}
 }
