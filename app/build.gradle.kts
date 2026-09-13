@@ -10,8 +10,8 @@ android {
         applicationId = "io.nrv.gameagent.ai"
         minSdk = 29
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.2.7"
+        versionCode = 11
+        versionName = "0.2.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
