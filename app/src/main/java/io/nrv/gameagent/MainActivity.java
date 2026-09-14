@@ -3,17 +3,23 @@ package io.nrv.gameagent;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -37,6 +43,8 @@ public class MainActivity extends AppCompatActivity {
     private MediaProjectionManager projectionManager;
     private TextView statusView;
     private boolean pendingCaptureAfterOverlay = false;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private View permissionPreview;
 
     private final ActivityResultLauncher<Intent> captureLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -55,19 +63,11 @@ public class MainActivity extends AppCompatActivity {
                 serviceIntent.putExtra(CaptureService.EXTRA_DENSITY, getResources().getDisplayMetrics().densityDpi);
 
                 ContextCompat.startForegroundService(this, serviceIntent);
-                setStatus("Захват активен · режим " + CompanionModeStore.title(CompanionModeStore.get(this)) + "\nПлавающая панель должна появиться поверх игры.");
+                setStatus("Захват запущен. Если разрешение «поверх приложений» активно, панель NRV появится сразу.");
             });
 
     private final ActivityResultLauncher<Intent> overlayLauncher =
-            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
-                if (pendingCaptureAfterOverlay && Settings.canDrawOverlays(this)) {
-                    pendingCaptureAfterOverlay = false;
-                    launchCaptureConsent();
-                } else if (pendingCaptureAfterOverlay) {
-                    pendingCaptureAfterOverlay = false;
-                    setStatus("Нужно разрешить «Поверх других приложений», иначе результат не будет виден в игре.");
-                }
-            });
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> resumeAfterOverlayPermission());
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -80,10 +80,15 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         if (pendingCaptureAfterOverlay && Settings.canDrawOverlays(this)) {
-            pendingCaptureAfterOverlay = false;
-            launchCaptureConsent();
+            resumeAfterOverlayPermission();
         }
         refreshStatus();
+    }
+
+    @Override
+    protected void onDestroy() {
+        removePermissionPreview();
+        super.onDestroy();
     }
 
     private View buildContent() {
@@ -106,13 +111,13 @@ public class MainActivity extends AppCompatActivity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Клавиатура + анализ экрана + плавающая панель · без Accessibility");
+        subtitle.setText("Клавиатура + анализ экрана + плавающая панель");
         subtitle.setTextSize(16);
         subtitle.setPadding(0, dp(6), 0, dp(16));
         root.addView(subtitle);
 
         TextView setup = new TextView(this);
-        setup.setText("1) Включи NRV AI Keyboard\n2) Выбери режим\n3) Нажми ЗАПУСТИТЬ АНАЛИЗ\n4) Разреши панель поверх приложений и захват экрана\n5) Вернись в игру — NRV будет виден поверх неё");
+        setup.setText("1) Разреши панель поверх приложений\n2) Нажми ЗАПУСТИТЬ АНАЛИЗ\n3) NRV сначала покажет тестовую зелёную панель\n4) Разреши захват экрана\n5) Вернись в игру");
         setup.setTextSize(16);
         setup.setPadding(dp(8), dp(8), dp(8), dp(14));
         root.addView(setup, fullWidthParams(0));
@@ -129,6 +134,18 @@ public class MainActivity extends AppCompatActivity {
             if (imm != null) imm.showInputMethodPicker();
         });
         root.addView(keyboardPicker, fullWidthParams(8));
+
+        Button overlayTest = new Button(this);
+        overlayTest.setText("ПРОВЕРИТЬ ПЛАВАЮЩУЮ ПАНЕЛЬ");
+        overlayTest.setOnClickListener(v -> {
+            if (!Settings.canDrawOverlays(this)) {
+                pendingCaptureAfterOverlay = false;
+                openOverlaySettings();
+            } else {
+                showPermissionPreview(false);
+            }
+        });
+        root.addView(overlayTest, fullWidthParams(8));
 
         TextView modeTitle = new TextView(this);
         modeTitle.setText("Режим анализа:");
@@ -189,8 +206,8 @@ public class MainActivity extends AppCompatActivity {
         ScreenInsightStore.Snapshot snapshot = ScreenInsightStore.read();
         String mode = CompanionModeStore.title(CompanionModeStore.get(this));
         String insight = snapshot.fresh(30_000) ? snapshot.text() : "Нет свежего анализа";
-        String overlay = Settings.canDrawOverlays(this) ? "панель разрешена" : "панель ещё не разрешена";
-        statusView.setText("Режим: " + mode + " · " + overlay + "\n" + insight);
+        String overlay = Settings.canDrawOverlays(this) ? "ПАНЕЛЬ: РАЗРЕШЕНА ✓" : "ПАНЕЛЬ: НЕТ РАЗРЕШЕНИЯ ✕";
+        statusView.setText(overlay + "\nРежим: " + mode + "\n" + insight);
     }
 
     private LinearLayout.LayoutParams fullWidthParams(int topMarginDp) {
@@ -221,16 +238,100 @@ public class MainActivity extends AppCompatActivity {
 
         if (!Settings.canDrawOverlays(this)) {
             pendingCaptureAfterOverlay = true;
-            setStatus("Сначала разреши NRV показывать маленькую панель поверх игры.");
-            Intent intent = new Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getPackageName())
-            );
-            overlayLauncher.launch(intent);
+            setStatus("Нужно включить разрешение «Поверх других приложений» для NRV.");
+            openOverlaySettings();
             return;
         }
 
-        launchCaptureConsent();
+        showPermissionPreview(true);
+    }
+
+    private void openOverlaySettings() {
+        Intent intent = new Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName())
+        );
+        overlayLauncher.launch(intent);
+    }
+
+    private void resumeAfterOverlayPermission() {
+        if (!Settings.canDrawOverlays(this)) {
+            if (pendingCaptureAfterOverlay) {
+                pendingCaptureAfterOverlay = false;
+                setStatus("Разрешение панели не включено. Включи «Поверх других приложений» для NRV.");
+            }
+            refreshStatus();
+            return;
+        }
+
+        if (pendingCaptureAfterOverlay) {
+            pendingCaptureAfterOverlay = false;
+            showPermissionPreview(true);
+        } else {
+            showPermissionPreview(false);
+        }
+    }
+
+    private void showPermissionPreview(boolean continueToCapture) {
+        removePermissionPreview();
+        if (!Settings.canDrawOverlays(this)) {
+            if (continueToCapture) startCapture();
+            return;
+        }
+
+        WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        TextView preview = new TextView(this);
+        preview.setText("NRV · ПАНЕЛЬ РАБОТАЕТ ✓");
+        preview.setTextColor(Color.WHITE);
+        preview.setTextSize(15);
+        preview.setTypeface(Typeface.DEFAULT_BOLD);
+        preview.setGravity(Gravity.CENTER);
+        preview.setPadding(dp(14), dp(10), dp(14), dp(10));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.rgb(24, 92, 50));
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(2), Color.rgb(121, 232, 139));
+        preview.setBackground(bg);
+
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                Build.VERSION.SDK_INT >= 26
+                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                        : WindowManager.LayoutParams.TYPE_PHONE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+        );
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.x = dp(12);
+        params.y = dp(70);
+
+        try {
+            wm.addView(preview, params);
+            permissionPreview = preview;
+            setStatus("Тестовая панель показана. Если ты видишь зелёную надпись NRV — разрешение работает.");
+            mainHandler.postDelayed(() -> {
+                removePermissionPreview();
+                if (continueToCapture && !isFinishing() && !isDestroyed()) {
+                    launchCaptureConsent();
+                }
+            }, 1800L);
+        } catch (Exception error) {
+            permissionPreview = null;
+            setStatus("Android не дал показать панель: " + error.getClass().getSimpleName());
+            Toast.makeText(this, "Панель не запускается. Проверь разрешение поверх приложений.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void removePermissionPreview() {
+        if (permissionPreview == null) return;
+        try {
+            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            wm.removeView(permissionPreview);
+        } catch (Exception ignored) {}
+        permissionPreview = null;
     }
 
     private void launchCaptureConsent() {
