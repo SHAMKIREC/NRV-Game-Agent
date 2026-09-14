@@ -16,7 +16,7 @@ import java.util.function.Consumer;
  */
 public final class PokerLiveStats {
     private final WorldPokerClubProfile profile = new WorldPokerClubProfile();
-    private final WpcCardReader reader = new WpcCardReader();
+    private final TemplateCardReader reader = new TemplateCardReader();
     private final ExecutorService equityExecutor = Executors.newSingleThreadExecutor();
 
     private List<Card> candidateHero = List.of();
@@ -108,7 +108,7 @@ public final class PokerLiveStats {
         });
     }
 
-    private synchronized StableRead stabilize(WpcCardReader.Result cards, WorldPokerClubProfile.Result table) {
+    private synchronized StableRead stabilize(TemplateCardReader.Result cards, WorldPokerClubProfile.Result table) {
         if (table.players() >= 2) stablePlayers = table.players();
 
         int expectedBoard = table.boardCards();
